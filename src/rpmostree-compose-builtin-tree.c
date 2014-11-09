@@ -776,6 +776,17 @@ rpmostree_compose_builtin_tree (int             argc,
       goto out;
     }
 
+  /* Both RPM and librepo try to intercept these.  We don't want that,
+   * we we *can* be interrupted sanely by just having the process die,
+   * since we never live-mutate a system.
+   */
+  {
+    struct sigaction act;
+    memset (&act, 0, sizeof (act));
+    sigaction (SIGINT, &act, NULL);
+    sigaction (SIGTERM, &act, NULL);
+  }
+
   /* Use a private mount namespace to avoid polluting the global
    * namespace, and to ensure any tmpfs mounts get cleaned up if we
    * exit unexpectedly.
