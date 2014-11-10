@@ -23,6 +23,8 @@
 #include <gio/gio.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <pwd.h>
+#include <stdio.h>
 
 void
 _rpmostree_set_error_from_errno (GError    **error,
@@ -59,3 +61,8 @@ _rpmostree_util_update_checksum_from_file (GChecksum    *checksum,
 gboolean
 _rpmostree_sync_wait_on_pid (pid_t          pid,
                              GError       **error);
+
+gboolean
+_rpmostree_getpwnam_alloc (const char     *logname,
+                           struct passwd **out_pwd,
+                           GError        **error);

@@ -33,6 +33,11 @@
 #include "rpmostree-treepkgdiff.h"
 #include "rpmostree-libcontainer.h"
 #include "rpmostree-postprocess.h"
+#include "rpmostree-rpmutil.h"
+#include "rpmostree-yumrepo.h"
+#include "rpmostree-librepo-impl.h"
+#include "rpmostree-libcontainer.h"
+#include <librepo/librepo.h>
 
 #include "libgsystem.h"
 
@@ -63,386 +68,10 @@ typedef struct {
   GPtrArray *treefile_context_dirs;
   
   GFile *workdir;
+  struct passwd *unpriv_user;
 
   GBytes *serialized_treefile;
 } RpmOstreeTreeComposeContext;
-
-static char *
-strv_join_shell_quote (char **argv)
-{
-  GString *ret = g_string_new ("");
-  char **strviter;
-
-  for (strviter = argv; strviter && *strviter; strviter++)
-    {
-      gs_free char *quoted = g_shell_quote (*strviter);
-      g_string_append_c (ret, ' ');
-      g_string_append (ret, quoted);
-    }
-
-  return g_string_free (ret, FALSE);
-}
-
-
-typedef struct {
-  gboolean running;
-  pid_t pid;
-  GFile *tmp_reposdir_path;
-  GDataOutputStream *stdin;
-} YumContext;
-
-static gboolean
-yum_context_close (YumContext   *yumctx,
-                   GCancellable *cancellable,
-                   GError      **error)
-{
-  gboolean ret = FALSE;
-
-  if (!yumctx)
-    return TRUE;
-
-  if (yumctx->running)
-    {
-      if (yumctx->stdin)
-        {
-          if (!g_output_stream_close ((GOutputStream*)yumctx->stdin, cancellable, error))
-            goto out;
-          g_clear_object (&yumctx->stdin);
-        }
-
-      g_print ("Waiting for yum...\n");
-      if (!_rpmostree_sync_wait_on_pid (yumctx->pid, error))
-        goto out;
-
-      g_print ("Waiting for yum [OK]\n");
-    }
-
-  ret = TRUE;
- out:
-  return ret;
-}
-
-static void
-yum_context_free (YumContext  *yumctx)
-{
-  if (!yumctx)
-    return;
-  (void) yum_context_close (yumctx, NULL, NULL);
-  g_free (yumctx);
-}
-
-static inline
-void cleanup_keyfile_unref (void *loc)
-{
-  GKeyFile *locp = *((GKeyFile**)loc);
-  if (locp)
-    g_key_file_unref (locp);
-}
-
-static gboolean
-append_repo_and_cache_opts (RpmOstreeTreeComposeContext *self,
-                            JsonObject *treedata,
-                            GPtrArray  *args,
-                            GCancellable *cancellable,
-                            GError    **error)
-{
-  gboolean ret = FALSE;
-  JsonArray *enable_repos = NULL;
-  guint i;
-  char **iter;
-  gs_unref_object GFile *yumcache_lookaside = NULL;
-  gs_unref_object GFile *repos_tmpdir = NULL;
-  gs_unref_ptrarray GPtrArray *reposdir_args = g_ptr_array_new_with_free_func (g_free);
-
-  if (opt_output_repodata_dir)
-    yumcache_lookaside = g_file_new_for_path (opt_output_repodata_dir);
-  else
-    {
-      yumcache_lookaside = g_file_resolve_relative_path (self->workdir, "yum-cache");
-      if (!gs_file_ensure_directory (yumcache_lookaside, TRUE, cancellable, error))
-        goto out;
-    }
-      
-  repos_tmpdir = g_file_resolve_relative_path (self->workdir, "tmp-repos");
-  if (!gs_shutil_rm_rf (repos_tmpdir, cancellable, error))
-    goto out;
-  if (!gs_file_ensure_directory (repos_tmpdir, TRUE, cancellable, error))
-    goto out;
-
-  if (g_getenv ("RPM_OSTREE_OFFLINE"))
-    g_ptr_array_add (args, g_strdup ("-C"));
-
-  {
-    const char *proxy;
-    if (opt_proxy)
-      proxy = opt_proxy;
-    else
-      proxy = g_getenv ("http_proxy");
-
-    if (proxy)
-      g_ptr_array_add (args, g_strconcat ("--setopt=proxy=", proxy, NULL));
-  }
-
-  g_ptr_array_add (args, g_strdup ("--disablerepo=*"));
-
-  /* Add the directory for each treefile to the reposdir argument */
-  for (i = 0; i < self->treefile_context_dirs->len; i++)
-    {
-      GFile *contextdir = self->treefile_context_dirs->pdata[i];
-      g_ptr_array_add (reposdir_args, g_file_get_path (contextdir));
-    }
-
-  /* Process local overrides */
-  for (iter = opt_override_pkg_repos; iter && *iter; iter++)
-    {
-      const char *repodir = *iter;
-      gs_free char *bn = g_path_get_basename (repodir);
-      gs_free char *reponame = g_strconcat ("rpm-ostree-override-", repodir, NULL);
-      gs_free char *baseurl = g_strconcat ("file://", repodir, NULL);
-      gs_free char *tmprepo_filename = g_strconcat (reponame, ".repo", NULL);
-      gs_unref_object GFile *tmprepo_path = g_file_get_child (repos_tmpdir, tmprepo_filename);
-      __attribute__ ((cleanup(cleanup_keyfile_unref)))  GKeyFile *keyfile = NULL;
-      gs_free char *data = NULL;
-      gsize len;
-
-      keyfile = g_key_file_new ();
-      g_key_file_set_string (keyfile, reponame, "name", reponame);
-      g_key_file_set_string (keyfile, reponame, "baseurl", baseurl);
-
-      data = g_key_file_to_data (keyfile, &len, NULL);
-
-      if (!g_file_replace_contents (tmprepo_path, data, len, NULL, FALSE, 0, NULL,
-                                    cancellable, error))
-        goto out;
-
-      g_ptr_array_add (args, g_strconcat ("--enablerepo=", reponame, NULL));
-    }
-
-  if (opt_override_pkg_repos)
-    g_ptr_array_add (reposdir_args, g_file_get_path (repos_tmpdir));
-
-  {
-    gboolean first = TRUE;
-    GString *reposdir_value = g_string_new ("--setopt=reposdir=");
-    
-    for (i = 0; i < reposdir_args->len; i++)
-      {
-        const char *reponame = reposdir_args->pdata[i];
-        if (first)
-          first = FALSE;
-        else
-          g_string_append_c (reposdir_value, ',');
-        g_string_append (reposdir_value, reponame); 
-      }
-    g_ptr_array_add (args, g_string_free (reposdir_value, FALSE));
-  }
-
-
-  if (json_object_has_member (treedata, "repos"))
-    enable_repos = json_object_get_array_member (treedata, "repos");
-  if (enable_repos)
-    {
-      guint i;
-      guint n = json_array_get_length (enable_repos);
-      for (i = 0; i < n; i++)
-        {
-          const char *reponame = _rpmostree_jsonutil_array_require_string_element (enable_repos, i, error);
-          if (!reponame)
-            goto out;
-          g_ptr_array_add (args, g_strconcat ("--enablerepo=", reponame, NULL));
-        }
-    }
-
-  g_ptr_array_add (args, g_strdup ("--setopt=keepcache=0"));
-  g_ptr_array_add (args, g_strconcat ("--setopt=cachedir=",
-                                      gs_file_get_path_cached (yumcache_lookaside),
-                                      NULL));
-
-  ret = TRUE;
- out:
-  return ret;
-}
-
-static YumContext *
-yum_context_new (RpmOstreeTreeComposeContext  *self,
-                 JsonObject     *treedata,
-                 GFile          *yumroot,
-                 GCancellable   *cancellable,
-                 GError        **error)
-{
-  gboolean success = FALSE;
-  YumContext *yumctx = NULL;
-  JsonNode *install_langs_n;
-  GPtrArray *yum_argv = g_ptr_array_new_with_free_func (g_free);
-  pid_t child;
-  int clone_flags = SIGCHLD | CLONE_NEWNS | CLONE_NEWPID;
-  int pipefds[2];
-
-  g_ptr_array_add (yum_argv, g_strdup ("yum"));
-  g_ptr_array_add (yum_argv, g_strdup ("-y"));
-
-  if (!append_repo_and_cache_opts (self, treedata, yum_argv,
-                                   cancellable, error))
-    goto out;
-
-  install_langs_n = json_object_get_member (treedata, "install-langs");
-  if (install_langs_n != NULL)
-    {
-      JsonArray *instlangs_a = json_node_get_array (install_langs_n);
-      guint len = json_array_get_length (instlangs_a);
-      guint i;
-      GString *opt = g_string_new ("--setopt=override_install_langs=");
-
-      for (i = 0; i < len; i++)
-        {
-          g_string_append (opt, json_array_get_string_element (instlangs_a, i));
-          if (i < len - 1)
-            g_string_append_c (opt, ',');
-        }
-
-      g_ptr_array_add (yum_argv, opt->str);
-      g_string_free (opt, FALSE);
-    }
-
-  g_ptr_array_add (yum_argv, g_strconcat ("--installroot=",
-                                          gs_file_get_path_cached (yumroot),
-                                          NULL));
-  
-  g_ptr_array_add (yum_argv, g_strdup ("shell"));
-
-  g_ptr_array_add (yum_argv, NULL);
-
-  if (!g_unix_open_pipe (pipefds, FD_CLOEXEC, error))
-    goto out;
-
-  if ((child = syscall (__NR_clone, clone_flags, NULL)) < 0)
-    {
-      _rpmostree_set_error_from_errno (error, errno);
-      goto out;
-    }
-  
-  if (child == 0)
-    {
-      if (dup2 (pipefds[0], 0) != 0)
-        _rpmostree_perror_fatal ("dup2()");
-      
-      /* This is used at the moment, but eventually I'd like to teach
-       * Fedora's kernel.spec to e.g. skip making an initramfs,
-       * because we're going to be making one.
-       */
-      setenv ("OSTREE_KERNEL_INSTALL_NOOP", "1", TRUE);
-      /* See fedora's kernel.spec; we don't need this because ostree
-       * itself takes care of dedup-via-hardlink.
-       */
-      setenv ("HARDLINK", "no", TRUE);
-
-      /* Turn off setuid binaries, we shouldn't need them */
-      if (_rpmostree_libcontainer_get_available ())
-        {
-          if (mount (NULL, "/", "none", MS_PRIVATE | MS_REMOUNT | MS_NOSUID, NULL) < 0)
-            _rpmostree_perror_fatal ("mount(/, MS_PRIVATE | MS_NOSUID)");
-        }
-
-      if (execvp ("yum", (char**)yum_argv->pdata) < 0)
-        _rpmostree_perror_fatal ("execvp");
-    }
-
-  (void) close (pipefds[0]);
-
-  {
-    gs_free char *cmdline = strv_join_shell_quote ((char**)yum_argv->pdata);
-    g_print ("Starting %s\n", cmdline);
-  }
-
-  yumctx = g_new0 (YumContext, 1);
-  yumctx->running = TRUE;
-  yumctx->pid = child;
-
-  {
-    gs_unref_object GOutputStream *yumproc_stdin = g_unix_output_stream_new (pipefds[1], TRUE);
-    yumctx->stdin = (GDataOutputStream*)g_data_output_stream_new (yumproc_stdin);
-  }
-
-  success = TRUE;
- out:
-  if (!success)
-    {
-      yum_context_free (yumctx);
-      return NULL;
-    }
-  return yumctx;
-}
-
-static gboolean
-yum_context_command (YumContext   *yumctx,
-                     const char   *cmd,
-                     GPtrArray   **out_lines,
-                     GCancellable *cancellable,
-                     GError      **error)
-{
-  gboolean ret = FALSE;
-  gsize bytes_written;
-  gs_unref_ptrarray GPtrArray *lines = g_ptr_array_new_with_free_func (g_free);
-  gs_free char *cmd_nl = g_strconcat (cmd, "\n", NULL);
-
-  g_print ("yum> %s", cmd_nl);
-  if (!g_output_stream_write_all ((GOutputStream*)yumctx->stdin,
-                                  cmd_nl, strlen (cmd_nl), &bytes_written,
-                                  cancellable, error))
-    goto out;
-
-  ret = TRUE;
-  gs_transfer_out_value (out_lines, &lines);
- out:
-  return ret;
-}
-                  
-static gboolean
-yuminstall (RpmOstreeTreeComposeContext  *self,
-            JsonObject      *treedata,
-            GFile           *yumroot,
-            char           **packages,
-            GCancellable    *cancellable,
-            GError         **error)
-{
-  gboolean ret = FALSE;
-  char **strviter;
-  YumContext *yumctx;
-
-  yumctx = yum_context_new (self, treedata, yumroot, cancellable, error);
-  if (!yumctx)
-    goto out;
-
-  for (strviter = packages; strviter && *strviter; strviter++)
-    {
-      gs_free char *cmd = NULL;
-      const char *package = *strviter;
-      gs_unref_ptrarray GPtrArray *lines = NULL;
-
-      if (g_str_has_prefix (package, "@"))
-        cmd = g_strconcat ("group install ", package, NULL);
-      else
-        cmd = g_strconcat ("install ", package, NULL);
-        
-      if (!yum_context_command (yumctx, cmd, &lines,
-                                cancellable, error))
-        goto out;
-    }
-
-  {
-    gs_unref_ptrarray GPtrArray *lines = NULL;
-    if (!yum_context_command (yumctx, "run", &lines,
-                              cancellable, error))
-      goto out;
-  }
-
-  if (!yum_context_close (yumctx, cancellable, error))
-    goto out;
-
-  ret = TRUE;
- out:
-  return ret;
-}
 
 static gboolean
 process_includes (RpmOstreeTreeComposeContext  *self,
@@ -724,6 +353,186 @@ parse_keyvalue_strings (char             **strings,
   return ret;
 }
 
+typedef struct {
+  gboolean running;
+  gboolean caught_error;
+  GError **error;
+} FetchRepoSyncData;
+
+static void
+on_fetch_md_progress (RpmOstreeLibRepoWorker  *worker,
+                      gdouble                  downloaded,
+                      gdouble                  total,
+                      gpointer                 user_data)
+{
+  gs_free char *downloaded_s = g_format_size ((guint64)downloaded);
+  gs_free char *total_s = g_format_size ((guint64)total);
+  g_print ("%s/%s\n", downloaded_s, total_s);
+}
+
+static void
+on_fetch_md_complete (RpmOstreeLibRepoWorker  *worker,
+                      gboolean                 success,
+                      const char              *msg,
+                      gpointer                 user_data)
+{
+  FetchRepoSyncData *syncdata = user_data;
+
+  syncdata->caught_error = !success;
+  if (syncdata->caught_error)
+    g_set_error_literal (syncdata->error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                         msg);
+  syncdata->running = FALSE;
+}
+
+static gboolean
+download_one_repo_sync (RpmOstreeTreeComposeContext  *self,
+                        const char                   *reponame,
+                        GCancellable                 *cancellable,
+                        GError                      **error)
+{
+  gboolean ret = FALSE;
+  GFile *contextdir = NULL;
+  gs_free char *repo_filename = NULL;
+  _cleanup_gkeyfile_ GKeyFile *repodata = NULL;
+  gs_unref_object GFile *repo_path = NULL;
+  gs_unref_object RpmOstreeLibRepoWorker *librepo_worker = NULL;
+  gs_free char *reposdir = NULL;
+  gs_free char *repo_outputdir = NULL;
+  char *downloadlist[] = LR_YUM_HAWKEY;
+  gs_free char *url = NULL;
+  FetchRepoSyncData syncdata;
+
+  contextdir = self->treefile_context_dirs->pdata[0];
+
+  reposdir = g_build_filename (gs_file_get_path_cached (self->workdir), "repos", NULL);
+  repo_outputdir = g_build_filename (gs_file_get_path_cached (self->workdir), "repos", reponame, NULL);
+  {
+    gs_unref_object GFile *repo_outputdir_f = g_file_new_for_path (repo_outputdir);
+    if (!gs_file_ensure_directory (repo_outputdir_f, TRUE, cancellable, error))
+      goto out;
+  }
+  if (chown (repo_outputdir, self->unpriv_user->pw_uid, self->unpriv_user->pw_gid) != 0)
+    {
+      int errsv = errno;
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "chown: %s", g_strerror (errsv));
+      goto out;
+    }
+
+  repo_filename = g_strconcat (reponame, ".repo", NULL);
+  repo_path = g_file_resolve_relative_path (contextdir, repo_filename);
+
+  if (!_rpmostree_load_yum_repo_file (repo_path, &repodata, cancellable, error))
+    goto out;
+
+  if (!g_key_file_has_group (repodata, reponame))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Repository file is missing expected group name '%s': %s",
+                   reponame, gs_file_get_path_cached (repo_path));
+      goto out;
+    }
+
+  url = g_key_file_get_string (repodata, reponame, "baseurl", error);
+  if (!url)
+    goto out;
+
+  if (!rpmostree_librepo_impl_spawn (&librepo_worker, cancellable, error))
+    goto out;
+
+  g_print ("Fetching MD for %s\n", url);
+
+  {
+    GVariantBuilder builder;
+    const char *basearch = rpmostree_get_base_arch ();
+
+    g_assert (basearch);
+
+    g_variant_builder_init (&builder, G_VARIANT_TYPE ("a{ss}"));
+    g_variant_builder_add (&builder, "{ss}", "basearch", basearch);
+
+    if (!rpm_ostree_lib_repo_worker_call_fetch_md_sync (librepo_worker, repo_outputdir,
+                                                        RPMOSTREE_LIBREPO_IMPL_URLTYPE_BASEURL,
+                                                        url,
+                                                        g_variant_builder_end (&builder),
+                                                        (const char *const*)downloadlist,
+                                                        cancellable, error))
+      goto out;
+  }
+
+  g_signal_connect (librepo_worker, "fetch-md-progress",
+                    G_CALLBACK (on_fetch_md_progress), &syncdata);
+  g_signal_connect (librepo_worker, "fetch-md-complete",
+                    G_CALLBACK (on_fetch_md_complete), &syncdata);
+
+  syncdata.caught_error = FALSE;
+  syncdata.error = error;
+  syncdata.running = TRUE;
+
+  while (syncdata.running)
+    g_main_context_iteration (NULL, TRUE);
+
+  if (syncdata.caught_error)
+    {
+      g_prefix_error (error, "Fetching repodata for '%s': ", reponame);
+      goto out;
+    }
+
+  g_printerr ("MD %s fetched to %s\n", reponame, repo_outputdir);
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+download_repos (RpmOstreeTreeComposeContext  *self,
+                JsonObject                   *treedata,
+                GCancellable                 *cancellable,
+                GError                      **error)
+{
+  gboolean ret = FALSE;
+  JsonArray *enable_repos = NULL;
+  guint i;
+  guint n;
+
+  g_assert_cmpint (self->treefile_context_dirs->len, >, 0);
+
+
+  if (json_object_has_member (treedata, "repos"))
+    enable_repos = json_object_get_array_member (treedata, "repos");
+  else
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Treefile has no 'repos' member");
+      goto out;
+    }
+
+  n = json_array_get_length (enable_repos);
+
+  for (i = 0; i < n; i++)
+    {
+      const char *reponame = _rpmostree_jsonutil_array_require_string_element (enable_repos, i, error);
+      if (!reponame)
+        goto out;
+            
+      if (strchr (reponame, '/') != NULL)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Invalid repository name '%s'", reponame);
+          goto out;
+        }
+
+      if (!download_one_repo_sync (self, reponame, cancellable, error))
+        goto out;
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
 gboolean
 rpmostree_compose_builtin_tree (int             argc,
                                 char          **argv,
@@ -787,6 +596,9 @@ rpmostree_compose_builtin_tree (int             argc,
     sigaction (SIGTERM, &act, NULL);
   }
 
+  if (!rpmostree_rpmutil_init (error))
+    goto out;
+
   /* Use a private mount namespace to avoid polluting the global
    * namespace, and to ensure any tmpfs mounts get cleaned up if we
    * exit unexpectedly.
@@ -833,6 +645,9 @@ rpmostree_compose_builtin_tree (int             argc,
       if (!_rpmostree_libcontainer_bind_mount_readonly ("/usr", error))
         goto out;
     }
+
+  if (!_rpmostree_getpwnam_alloc (RPMOSTREE_UNPRIV_USER, &self->unpriv_user, error))
+    goto out;
 
   repo_path = g_file_new_for_path (opt_repo);
   repo = ostree_repo_new (repo_path);
@@ -952,9 +767,7 @@ rpmostree_compose_builtin_tree (int             argc,
     self->serialized_treefile = g_bytes_new_take (treefile_buf, len);
   }
 
-  if (!yuminstall (self, treefile, yumroot,
-                   (char**)packages->pdata,
-                   cancellable, error))
+  if (!download_repos (self, treefile, cancellable, error))
     goto out;
 
   cachekey = g_strconcat ("treecompose/", ref, NULL);

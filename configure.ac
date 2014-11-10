@@ -39,7 +39,7 @@ AC_SUBST(CAP_LIBS)
 LIBS="$save_LIBS"
 
 PKG_CHECK_MODULES(PKGDEP_GIO_UNIX, [gio-unix-2.0])
-PKG_CHECK_MODULES(PKGDEP_RPMOSTREE, [gio-unix-2.0 json-glib-1.0 ostree-1 >= 2014.7 libgsystem rpm hawkey])
+PKG_CHECK_MODULES(PKGDEP_RPMOSTREE, [gio-unix-2.0 json-glib-1.0 ostree-1 >= 2014.7 libgsystem rpm hawkey librepo])
 AC_PATH_PROG([XSLTPROC], [xsltproc])
 
 GOBJECT_INTROSPECTION_REQUIRE([1.34.0])
@@ -75,6 +75,14 @@ AM_CONDITIONAL(BUILDOPT_COMPOSE_TOOLING, [test x$enable_compose_tooling = xyes])
 AS_IF([test x$enable_compose_tooling = xyes], [
     AC_DEFINE(HAVE_COMPOSE_TOOLING, 1, [Define if we are building compose tooling])
 ])
+
+AC_ARG_WITH(unprivileged-user,
+        AS_HELP_STRING([--with-unprivileged-user=NAME]
+                [Unix user for unprivileged operations such as HTTP requests (default: bin)]),
+        [RPMOSTREE_UNPRIV_USER="$withval"],
+        [RPMOSTREE_UNPRIV_USER="bin"])
+AC_DEFINE_UNQUOTED(RPMOSTREE_UNPRIV_USER, ["$RPMOSTREE_UNPRIV_USER"], [Unprivileged user namae])
+AC_SUBST(RPMOSTREE_UNPRIV_USER)
 
 AC_CONFIG_FILES([
 Makefile

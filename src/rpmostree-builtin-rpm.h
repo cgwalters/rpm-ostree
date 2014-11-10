@@ -18,9 +18,8 @@
  * Boston, MA 02111-1307, USA.
  */
 
-#include <rpm/rpmlib.h>
-#include <rpm/rpmlog.h>
 #include "rpmostree-util.h"
+#include "rpmostree-rpmutil.h"
 
 struct RpmRevisionData
 {

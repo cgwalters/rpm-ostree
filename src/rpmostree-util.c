@@ -183,3 +183,63 @@ _rpmostree_sync_wait_on_pid (pid_t          pid,
  out:
   return ret;
 }
+
+/* Adapted from getpnam_r code in glib/gutils.c, but modified to
+ * return a value, and dropping Android/AIX code.
+ */
+gboolean
+_rpmostree_getpwnam_alloc (const char     *logname,
+                           struct passwd **out_pwd,
+                           GError        **error)
+{
+  gboolean ret = FALSE;
+  gs_free gpointer buffer = NULL;
+  /* This reurns the maximum length */
+  glong bufsize = sysconf (_SC_GETPW_R_SIZE_MAX);
+
+  if (bufsize < 0)
+    bufsize = 64;
+
+  while (TRUE)
+    {
+      struct passwd *result;
+      int r;
+
+      g_free (buffer);
+      /* we allocate 6 extra bytes to work around a bug in
+       * Mac OS < 10.3. See #156446
+       */
+      buffer = g_malloc (sizeof (struct passwd) + bufsize + 6);
+      errno = 0;
+
+      do
+        r = getpwnam_r (logname, (struct passwd*)buffer,
+                        ((char*)buffer) + sizeof (struct passwd),
+                        bufsize - sizeof (struct passwd),
+                        &result);
+      while (G_UNLIKELY (r == -1 && errno == EINTR));
+      if (result)
+        break;
+      else
+        {
+          int errsv = errno;
+          if (errsv == ERANGE)
+            {
+              bufsize *= 2;
+              continue;
+            }
+          else
+            {
+              g_set_error_literal (error, G_IO_ERROR, g_io_error_from_errno (errsv),
+                                   g_strerror (errsv));
+              goto out;
+            }
+        }
+    }
+
+  ret = TRUE;
+  *out_pwd = buffer;
+  buffer = NULL;
+ out:
+  return ret;
+}

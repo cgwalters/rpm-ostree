@@ -74,7 +74,6 @@ _rpmostree_libcontainer_bind_mount_readonly (const char *path, GError **error)
   return ret;
 }
 
-
 /* Based on code from nspawn.c */
 int
 _rpmostree_libcontainer_make_api_mounts (const char *dest)

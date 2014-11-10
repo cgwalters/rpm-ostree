@@ -25,6 +25,7 @@
 #include <gio/gio.h>
 
 #include "rpmostree-builtins.h"
+#include "rpmostree-rpmutil.h"
 #include "rpmostree-treepkgdiff.h"
 #include "rpmostree-pull-progress.h"
 #include "rpmostree-builtin-rpm.h"
@@ -161,13 +162,9 @@ rpmostree_builtin_upgrade (int             argc,
 
           if (!ostree_parse_refspec (origin_description, &remote, &ref, error))
              goto out;
-
-          if (rpmReadConfigFiles (NULL, NULL))
-            {
-              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "rpm failed to init: %s", rpmlogMessage());
-              goto out;
-            }
+          
+          if (!rpmostree_rpmutil_init (error))
+            goto out;
 
           rpmdbdir = g_file_new_for_path (tmpd);
 

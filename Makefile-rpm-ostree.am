@@ -19,7 +19,23 @@ bin_PROGRAMS += rpm-ostree
 
 noinst_LTLIBRARIES += librpmostree.la
 
+dbus_built_sources = rpmostree-generated.h rpmostree-generated.c
+
+rpmostree-generated.h: rpmostree-generated.c
+rpmostree-generated.c: Makefile src/rpmostree.LibRepo.xml
+	$(AM_V_GEN) gdbus-codegen \
+		--interface-prefix rpmostree.				\
+		--c-namespace RpmOstree							\
+		--c-generate-object-manager						\
+		--generate-c-code rpmostree-generated                             		\
+		--generate-docbook rpmostree-generated-doc					\
+		$(top_srcdir)/src/rpmostree.LibRepo.xml	\
+		$(NULL)
+BUILT_SOURCES += $(dbus_built_sources)
+CLEANFILES += rpmostree-generated*
+
 librpmostree_la_SOURCES = \
+	$(dbus_built_sources) \
 	src/rpmostree-postprocess.c \
 	src/rpmostree-postprocess.h \
 	src/rpmostree-pull-progress.c \
@@ -30,11 +46,19 @@ librpmostree_la_SOURCES = \
 	src/rpmostree-util.h \
 	src/rpmostree-libcontainer.c \
 	src/rpmostree-libcontainer.h \
+	src/rpmostree-rpmutil.c \
+	src/rpmostree-rpmutil.h \
 	src/hif-utils.c \
 	src/hif-utils.h \
 	src/rpmostree-cleanup.h \
 	src/rpmostree-treepkgdiff.c \
 	src/rpmostree-treepkgdiff.h \
+	src/rpmostree-libcontainer.c \
+	src/rpmostree-libcontainer.h \
+	src/rpmostree-yumrepo.c \
+	src/rpmostree-yumrepo.h \
+	src/rpmostree-librepo-impl.c \
+	src/rpmostree-librepo-impl.h \
 	src/rpmostree-builtin-rpm.h  \
 	$(NULL)
 if BUILDOPT_PATCHED_HAWKEY_AND_LIBSOLV

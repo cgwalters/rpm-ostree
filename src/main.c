@@ -28,6 +28,7 @@
 #include <locale.h>
 
 #include "rpmostree-builtins.h"
+#include "rpmostree-librepo-impl.h"
 
 #include "libgsystem.h"
 
@@ -167,6 +168,17 @@ main (int    argc,
         }
       usage (argv, TRUE);
       goto out;
+    }
+
+  if (g_str_has_prefix (cmd, "helper-process-"))
+    {
+      const char *helper_name = cmd + strlen ("helper-process-");
+
+      if (strcmp (helper_name, "librepo") == 0)
+        {
+          if (!rpmostree_librepo_impl_main (&error))
+            goto out;
+        }
     }
 
   command = commands;
