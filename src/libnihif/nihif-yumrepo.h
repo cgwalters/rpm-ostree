@@ -25,8 +25,8 @@
 #include <librepo/util.h>
 
 gboolean
-_rpmostree_load_yum_repo_file (GFile         *repo_path,
-			       GKeyFile     **out_keyfile,
-			       GCancellable  *cancellable,
-			       GError       **error);
+nihif_load_yum_repo_file (GFile         *repo_path,
+                          GKeyFile     **out_keyfile,
+                          GCancellable  *cancellable,
+                          GError       **error);
 

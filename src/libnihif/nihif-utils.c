@@ -28,13 +28,13 @@
 #include <hawkey/errno.h>
 #include <hawkey/packagelist.h>
 
-#include "hif-utils.h"
+#include "nihif-utils.h"
 
 /**
  * hif_rc_to_gerror:
  */
 gboolean
-hif_rc_to_gerror (gint rc, GError **error)
+nihif_rc_to_gerror (gint rc, GError **error)
 {
 	if (rc == 0)
 		return TRUE;

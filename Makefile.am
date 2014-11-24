@@ -28,6 +28,7 @@ AM_CFLAGS += $(WARN_CFLAGS)
 
 EXTRA_DIST += autogen.sh COPYING
 
+include Makefile-libnihif.am
 include Makefile-rpm-ostree.am
 include Makefile-tests.am
 include Makefile-man.am

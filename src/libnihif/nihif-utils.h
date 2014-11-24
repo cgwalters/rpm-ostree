@@ -25,7 +25,7 @@
 #include <hawkey/package.h>
 #include <hawkey/packagelist.h>
 
-gboolean	 hif_rc_to_gerror		(gint			 rc,
+gboolean	 nihif_rc_to_gerror		(gint			 rc,
 						 GError			**error);
 
 #endif /* __HIF_UTILS_H */

@@ -22,7 +22,7 @@
    Boston, MA 02111-1307, USA.
     -->
 
-  <interface name="rpmostree.LibRepoWorker">
+  <interface name="nihif.LibRepoWorker">
     <method name="FetchMD">
       <arg name="outputdir" type="s" direction="in"/>
       <arg name="urltype" type="u" direction="in"/>

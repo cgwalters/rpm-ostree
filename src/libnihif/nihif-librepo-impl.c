@@ -20,7 +20,7 @@
 
 #include "config.h"
 
-#include "rpmostree-librepo-impl.h"
+#include "nihif-librepo-impl.h"
 
 #include <string.h>
 #include <glib-unix.h>
@@ -33,63 +33,63 @@
 
 #include <librepo/librepo.h>
 
-#include "rpmostree-generated.h"
+#include "nihif-generated.h"
 #include "rpmostree-util.h"
 #include "libgsystem.h"
 
-struct _RpmOstreeLibRepoImpl
+struct _NihifLibRepoImpl
 {
-  RpmOstreeLibRepoWorkerSkeleton parent_instance;
+  NihifLibRepoWorkerSkeleton parent_instance;
 
   GMutex lock;
   
   GThread *op_thread;
 };
 
-typedef struct _RpmOstreeLibRepoImplClass
+typedef struct _NihifLibRepoImplClass
 {
-  RpmOstreeLibRepoWorkerSkeletonClass parent_class;
-} RpmOstreeLibRepoImplClass;
+  NihifLibRepoWorkerSkeletonClass parent_class;
+} NihifLibRepoImplClass;
 
-static void rpmostree_librepo_worker_iface_init (RpmOstreeLibRepoWorkerIface *iface);
+static void nihif_librepo_worker_iface_init (NihifLibRepoWorkerIface *iface);
 
-G_DEFINE_TYPE_WITH_CODE (RpmOstreeLibRepoImpl, rpmostree_librepo_impl,
-                         RPM_OSTREE_TYPE_LIB_REPO_WORKER_SKELETON,
-                         G_IMPLEMENT_INTERFACE (RPM_OSTREE_TYPE_LIB_REPO_WORKER, rpmostree_librepo_worker_iface_init));
+G_DEFINE_TYPE_WITH_CODE (NihifLibRepoImpl, nihif_librepo_impl,
+                         NIHIF_TYPE_LIB_REPO_WORKER_SKELETON,
+                         G_IMPLEMENT_INTERFACE (NIHIF_TYPE_LIB_REPO_WORKER, nihif_librepo_worker_iface_init));
 
 static void
-rpmostree_librepo_impl_init (RpmOstreeLibRepoImpl *self)
+nihif_librepo_impl_init (NihifLibRepoImpl *self)
 {
   g_mutex_init (&self->lock);
 }
 
 static void
-rpmostree_librepo_impl_finalize (GObject *object)
+nihif_librepo_impl_finalize (GObject *object)
 {
-  RpmOstreeLibRepoImpl *self = (RpmOstreeLibRepoImpl *)object;
+  NihifLibRepoImpl *self = (NihifLibRepoImpl *)object;
   g_mutex_clear (&self->lock);
-  G_OBJECT_CLASS (rpmostree_librepo_impl_parent_class)->finalize (object);
+  G_OBJECT_CLASS (nihif_librepo_impl_parent_class)->finalize (object);
 }
 
 static void
-rpmostree_librepo_impl_constructed (GObject *object)
+nihif_librepo_impl_constructed (GObject *object)
 {
-  if (G_OBJECT_CLASS (rpmostree_librepo_impl_parent_class)->constructed != NULL)
-    G_OBJECT_CLASS (rpmostree_librepo_impl_parent_class)->constructed (object);
+  if (G_OBJECT_CLASS (nihif_librepo_impl_parent_class)->constructed != NULL)
+    G_OBJECT_CLASS (nihif_librepo_impl_parent_class)->constructed (object);
 }
 
 static void
-rpmostree_librepo_impl_class_init (RpmOstreeLibRepoImplClass *klass)
+nihif_librepo_impl_class_init (NihifLibRepoImplClass *klass)
 {
   GObjectClass *gobject_class;
 
   gobject_class = G_OBJECT_CLASS (klass);
-  gobject_class->finalize = rpmostree_librepo_impl_finalize;
-  gobject_class->constructed = rpmostree_librepo_impl_constructed;
+  gobject_class->finalize = nihif_librepo_impl_finalize;
+  gobject_class->constructed = nihif_librepo_impl_constructed;
 }
 
 static gboolean
-handle_fetch_md (RpmOstreeLibRepoWorker *worker,
+handle_fetch_md (NihifLibRepoWorker *worker,
                  GDBusMethodInvocation *invocation,
                  const char *outputdir,
                  guint urltype_u,
@@ -98,15 +98,15 @@ handle_fetch_md (RpmOstreeLibRepoWorker *worker,
                  const char * const *downloadlist);
 
 static void
-rpmostree_librepo_worker_iface_init (RpmOstreeLibRepoWorkerIface *iface)
+nihif_librepo_worker_iface_init (NihifLibRepoWorkerIface *iface)
 {
   iface->handle_fetch_md = handle_fetch_md;
 }
 
 typedef struct {
-  RpmOstreeLibRepoImpl *self;
+  NihifLibRepoImpl *self;
   char *outputdir;
-  RpmOstreeLibRepoImplUrlType urltype;
+  NihifLibRepoImplUrlType urltype;
   char *url;
   GVariant *urlvars;
   char **downloadlist;
@@ -132,7 +132,7 @@ idle_emit_progress (gpointer user_data)
   data->progress_source = NULL;
   g_mutex_unlock (&data->progress_lock);
 
-  rpm_ostree_lib_repo_worker_emit_fetch_md_progress ((RpmOstreeLibRepoWorker*)data->self, now_downloaded, total_to_download);
+  nihif_lib_repo_worker_emit_fetch_md_progress ((NihifLibRepoWorker*)data->self, now_downloaded, total_to_download);
 
   return FALSE;
 }
@@ -171,13 +171,13 @@ idle_emit_fetch_md_complete (gpointer user_data)
 
   if (data->error)
     {
-      rpm_ostree_lib_repo_worker_emit_fetch_md_complete ((RpmOstreeLibRepoWorker*)data->self, FALSE,
+      nihif_lib_repo_worker_emit_fetch_md_complete ((NihifLibRepoWorker*)data->self, FALSE,
                                                          data->error->message);
       g_clear_error (&data->error);
     }
   else
     {
-      rpm_ostree_lib_repo_worker_emit_fetch_md_complete ((RpmOstreeLibRepoWorker*)data->self,
+      nihif_lib_repo_worker_emit_fetch_md_complete ((NihifLibRepoWorker*)data->self,
                                                          TRUE, "");
     }
 
@@ -219,14 +219,14 @@ fetch_md_thread (gpointer user_data)
 
   switch (data->urltype)
     {
-    case RPMOSTREE_LIBREPO_IMPL_URLTYPE_BASEURL:
+    case NIHIF_LIBREPO_IMPL_URLTYPE_BASEURL:
       {
         char *urls[] = { data->url, NULL };
 	if (!lr_handle_setopt (lr_handle, error, LRO_URLS, urls))
           return FALSE;
         break;
       }
-    case RPMOSTREE_LIBREPO_IMPL_URLTYPE_METALINK:
+    case NIHIF_LIBREPO_IMPL_URLTYPE_METALINK:
       {
         if (!lr_handle_setopt (lr_handle, error, LRO_METALINKURL, data->url))
           return FALSE;
@@ -258,7 +258,7 @@ fetch_md_thread (gpointer user_data)
 }
 
 static gboolean
-handle_fetch_md (RpmOstreeLibRepoWorker *worker,
+handle_fetch_md (NihifLibRepoWorker *worker,
                  GDBusMethodInvocation *invocation,
                  const char *outputdir,
                  guint urltype_u,
@@ -266,7 +266,7 @@ handle_fetch_md (RpmOstreeLibRepoWorker *worker,
                  GVariant *urlvars,
                  const char * const *downloadlist)
 {
-  RpmOstreeLibRepoImpl *self = RPMOSTREE_LIBREPO_IMPL (worker);
+  NihifLibRepoImpl *self = NIHIF_LIBREPO_IMPL (worker);
   GError *local_error = NULL;
   GError **error = &local_error;
   FetchMdThreadData *threaddata;
@@ -278,7 +278,7 @@ handle_fetch_md (RpmOstreeLibRepoWorker *worker,
       goto out;
     }
 
-  if (urltype_u > RPMOSTREE_LIBREPO_IMPL_URLTYPE_LAST)
+  if (urltype_u > NIHIF_LIBREPO_IMPL_URLTYPE_LAST)
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Invalid urltype '%u'", urltype_u);
@@ -305,14 +305,14 @@ handle_fetch_md (RpmOstreeLibRepoWorker *worker,
 }
 
 gboolean
-rpmostree_librepo_impl_main (GError **error)
+nihif_librepo_impl_main (GError **error)
 {
   gboolean ret = FALSE;
   GCancellable *cancellable = NULL;
   gs_unref_object GSocket *sock = NULL;
   gs_unref_object GSocketConnection *sockconn = NULL;
   gs_unref_object GDBusConnection *dbusconn = NULL;
-  gs_unref_object RpmOstreeLibRepoImpl *impl = NULL;
+  gs_unref_object NihifLibRepoImpl *impl = NULL;
 
   prctl (PR_SET_PDEATHSIG, SIGTERM);
 
@@ -326,9 +326,9 @@ rpmostree_librepo_impl_main (GError **error)
   if (!dbusconn)
     goto out;
 
-  impl = g_object_new (RPMOSTREE_TYPE_LIBREPO_IMPL, NULL);
+  impl = g_object_new (NIHIF_TYPE_LIBREPO_IMPL, NULL);
   if (!g_dbus_interface_skeleton_export ((GDBusInterfaceSkeleton*)impl, dbusconn,
-                                         "/rpmostree/librepoworker", error))
+                                         "/nihif/librepoworker", error))
     goto out;
 
   while (TRUE)
@@ -376,7 +376,7 @@ librepo_child_setup (gpointer datap)
 }
 
 gboolean
-rpmostree_librepo_impl_spawn (RpmOstreeLibRepoWorker  **out_worker,
+nihif_librepo_impl_spawn (NihifLibRepoWorker  **out_worker,
                               GCancellable             *cancellable,
                               GError                  **error)
 {
@@ -386,7 +386,7 @@ rpmostree_librepo_impl_spawn (RpmOstreeLibRepoWorker  **out_worker,
   gs_unref_object GSocket *sock = NULL;
   gs_unref_object GSocketConnection *sockconn = NULL;
   gs_unref_object GDBusConnection *dbusconn = NULL;
-  gs_unref_object RpmOstreeLibRepoWorker *ret_worker = NULL;
+  gs_unref_object NihifLibRepoWorker *ret_worker = NULL;
   const char *const spawn_argv[] = { "rpm-ostree", "helper-process-librepo", NULL };
   gs_free struct passwd *unpriv_user = NULL;
   ChildSetupData childdata;
@@ -424,9 +424,9 @@ rpmostree_librepo_impl_spawn (RpmOstreeLibRepoWorker  **out_worker,
   if (!dbusconn)
     goto out;
   
-  ret_worker = rpm_ostree_lib_repo_worker_proxy_new_sync (dbusconn, 0, NULL,
-                                                          "/rpmostree/librepoworker",
-                                                          cancellable, error);
+  ret_worker = nihif_lib_repo_worker_proxy_new_sync (dbusconn, 0, NULL,
+                                                     "/nihif/librepoworker",
+                                                     cancellable, error);
   if (!ret_worker)
     goto out;
 

@@ -20,7 +20,7 @@
 
 #include "config.h"
 
-#include "rpmostree-yumrepo.h"
+#include "nihif-yumrepo.h"
 #include "libgsystem.h"
 
 /**
@@ -80,10 +80,10 @@ hif_repos_load_multiline_key_file (const gchar *filename, GError **error)
 }
 
 gboolean
-_rpmostree_load_yum_repo_file (GFile         *repo_path,
-                               GKeyFile     **out_keyfile,
-                               GCancellable  *cancellable,
-                               GError       **error)
+nihif_load_yum_repo_file (GFile         *repo_path,
+                          GKeyFile     **out_keyfile,
+                          GCancellable  *cancellable,
+                          GError       **error)
 {
   gboolean ret = TRUE;
 

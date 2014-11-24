@@ -34,9 +34,10 @@
 #include "rpmostree-libcontainer.h"
 #include "rpmostree-postprocess.h"
 #include "rpmostree-rpmutil.h"
-#include "rpmostree-yumrepo.h"
-#include "rpmostree-librepo-impl.h"
+#include "nihif-yumrepo.h"
+#include "nihif-librepo-impl.h"
 #include "rpmostree-libcontainer.h"
+#include <hawkey/package.h>
 #include <librepo/librepo.h>
 
 #include "libgsystem.h"
@@ -360,7 +361,7 @@ typedef struct {
 } FetchRepoSyncData;
 
 static void
-on_fetch_md_progress (RpmOstreeLibRepoWorker  *worker,
+on_fetch_md_progress (NihifLibRepoWorker  *worker,
                       gdouble                  downloaded,
                       gdouble                  total,
                       gpointer                 user_data)
@@ -371,7 +372,7 @@ on_fetch_md_progress (RpmOstreeLibRepoWorker  *worker,
 }
 
 static void
-on_fetch_md_complete (RpmOstreeLibRepoWorker  *worker,
+on_fetch_md_complete (NihifLibRepoWorker  *worker,
                       gboolean                 success,
                       const char              *msg,
                       gpointer                 user_data)
@@ -396,7 +397,7 @@ download_one_repo_sync (RpmOstreeTreeComposeContext  *self,
   gs_free char *repo_filename = NULL;
   _cleanup_gkeyfile_ GKeyFile *repodata = NULL;
   gs_unref_object GFile *repo_path = NULL;
-  gs_unref_object RpmOstreeLibRepoWorker *librepo_worker = NULL;
+  gs_unref_object NihifLibRepoWorker *librepo_worker = NULL;
   gs_free char *reposdir = NULL;
   gs_free char *repo_outputdir = NULL;
   char *downloadlist[] = LR_YUM_HAWKEY;
@@ -423,7 +424,7 @@ download_one_repo_sync (RpmOstreeTreeComposeContext  *self,
   repo_filename = g_strconcat (reponame, ".repo", NULL);
   repo_path = g_file_resolve_relative_path (contextdir, repo_filename);
 
-  if (!_rpmostree_load_yum_repo_file (repo_path, &repodata, cancellable, error))
+  if (!nihif_load_yum_repo_file (repo_path, &repodata, cancellable, error))
     goto out;
 
   if (!g_key_file_has_group (repodata, reponame))
@@ -438,7 +439,7 @@ download_one_repo_sync (RpmOstreeTreeComposeContext  *self,
   if (!url)
     goto out;
 
-  if (!rpmostree_librepo_impl_spawn (&librepo_worker, cancellable, error))
+  if (!nihif_librepo_impl_spawn (&librepo_worker, cancellable, error))
     goto out;
 
   g_print ("Fetching MD for %s\n", url);
@@ -452,8 +453,8 @@ download_one_repo_sync (RpmOstreeTreeComposeContext  *self,
     g_variant_builder_init (&builder, G_VARIANT_TYPE ("a{ss}"));
     g_variant_builder_add (&builder, "{ss}", "basearch", basearch);
 
-    if (!rpm_ostree_lib_repo_worker_call_fetch_md_sync (librepo_worker, repo_outputdir,
-                                                        RPMOSTREE_LIBREPO_IMPL_URLTYPE_BASEURL,
+    if (!nihif_lib_repo_worker_call_fetch_md_sync (librepo_worker, repo_outputdir,
+                                                   NIHIF_LIBREPO_IMPL_URLTYPE_BASEURL,
                                                         url,
                                                         g_variant_builder_end (&builder),
                                                         (const char *const*)downloadlist,

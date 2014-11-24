@@ -29,7 +29,6 @@
 #include <hawkey/goal.h>
 #include <hawkey/version.h>
 #include <hawkey/util.h>
-#include "hif-utils.h"
 
 #include "rpmostree-util.h"
 

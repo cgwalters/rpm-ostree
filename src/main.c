@@ -28,7 +28,7 @@
 #include <locale.h>
 
 #include "rpmostree-builtins.h"
-#include "rpmostree-librepo-impl.h"
+#include "nihif-librepo-impl.h"
 
 #include "libgsystem.h"
 
@@ -176,7 +176,7 @@ main (int    argc,
 
       if (strcmp (helper_name, "librepo") == 0)
         {
-          if (!rpmostree_librepo_impl_main (&error))
+          if (!nihif_librepo_impl_main (&error))
             goto out;
         }
     }

@@ -32,6 +32,7 @@
 #include <grp.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <hawkey/package.h>
 
 #include "rpmostree-postprocess.h"
 #include "rpmostree-libcontainer.h"

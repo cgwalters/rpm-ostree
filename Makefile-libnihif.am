@@ -1,0 +1,43 @@
+# Copyright (C) 2013 Colin Walters <walters@verbum.org>
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the
+# Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+# Boston, MA 02111-1307, USA.
+
+noinst_LTLIBRARIES += libnihif.la
+
+nihif_dbus_built_sources = nihif-generated.h nihif-generated.c
+
+nihif-generated.h: nihif-generated.c
+nihif-generated.c: Makefile src/libnihif/nihif.LibRepo.xml
+	$(AM_V_GEN) gdbus-codegen \
+		--interface-prefix nihif.				\
+		--c-namespace Nihif							\
+		--c-generate-object-manager						\
+		--generate-c-code nihif-generated                             		\
+		$(top_srcdir)/src/libnihif/nihif.LibRepo.xml	\
+		$(NULL)
+BUILT_SOURCES += $(nihif_dbus_built_sources)
+
+libnihif_la_SOURCES = \
+	$(nihif_dbus_built_sources) \
+	src/libnihif/nihif-utils.c \
+	src/libnihif/nihif-utils.h \
+	src/libnihif/nihif-yumrepo.c \
+	src/libnihif/nihif-yumrepo.h \
+	src/libnihif/nihif-librepo-impl.c \
+	src/libnihif/nihif-librepo-impl.h \
+	$(NULL)
+libnihif_la_CFLAGS = $(AM_CFLAGS) -I$(srcdir)/src -I$(srcdir)/src/libnihif -DPKGLIBDIR=\"$(pkglibdir)\" $(PKGDEP_RPMOSTREE_CFLAGS)
+libnihif_la_LIBADD = $(AM_LDFLAGS) $(PKGDEP_RPMOSTREE_LIBS) $(CAP_LIBS)
