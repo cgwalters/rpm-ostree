@@ -29,6 +29,7 @@
 #include <locale.h>
 
 #include "rpmostree-builtins.h"
+#include "pkgworker-install-impl.h"
 
 #include "libgsystem.h"
 
@@ -147,6 +148,23 @@ main (int    argc,
   /* Keep the "rpm" command working for backward-compatibility. */
   if (g_strcmp0 (command_name, "rpm") == 0)
     command_name = "db";
+
+  if (g_str_has_prefix (command_name, "helper-process-"))
+    {
+      const char *helper_name = command_name + strlen ("helper-process-");
+
+      if (strcmp (helper_name, "install") == 0)
+        {
+          if (!pkg_worker_install_impl_main (&error))
+            goto out;
+        }
+      else
+        {
+          g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Unknown helper process type '%s'", helper_name);
+          goto out;
+        }
+    }
 
   command = commands;
   while (command->name)

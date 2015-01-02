@@ -33,6 +33,8 @@
 #include "rpmostree-util.h"
 #include "rpmostree-json-parsing.h"
 #include "rpmostree-cleanup.h"
+#include "pkgworker-install-impl.h"
+#include "pkgworker-generated.h"
 #include "rpmostree-treepkgdiff.h"
 #include "rpmostree-libcontainer.h"
 #include "rpmostree-console-progress.h"
@@ -346,6 +348,19 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
       goto out;
 
     g_signal_handler_disconnect (hifstate, progress_sigid);
+  }
+
+  { gs_unref_object PkgWorkerInstall *pkgworker_install = NULL;
+    gs_free char *msg = NULL;
+    
+    if (!pkg_worker_install_impl_spawn (&pkgworker_install, cancellable, error))
+      goto out;
+
+    if (!pkg_worker_install_call_hello_install_sync (pkgworker_install, &msg,
+                                                     cancellable, error))
+      goto out;
+    
+    g_assert_cmpstr (msg, ==, "hi");
   }
 
   { _cleanup_rpmostree_console_progress_ G_GNUC_UNUSED gpointer dummy;
