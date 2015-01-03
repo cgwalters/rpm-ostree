@@ -231,6 +231,8 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
     JsonArray *enable_repos = NULL;
     gs_unref_hashtable GHashTable *enabled_repo_names =
       g_hash_table_new (g_str_hash, g_str_equal);
+    gs_unref_hashtable GHashTable *found_enabled_repo_names =
+      g_hash_table_new (g_str_hash, g_str_equal);
     guint i;
     guint n;
 
@@ -257,11 +259,38 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
     for (i = 0; i < sources->len; i++)
       {
         HifSource *src = g_ptr_array_index (sources, i);
+        const char *id = hif_source_get_id (src);
 
-        if (!g_hash_table_lookup (enabled_repo_names, hif_source_get_id (src)))
+        if (!g_hash_table_remove (enabled_repo_names, id))
           hif_source_set_enabled (src, HIF_SOURCE_ENABLED_NONE);
         else
           hif_source_set_enabled (src, HIF_SOURCE_ENABLED_PACKAGES);
+      }
+
+    if (g_hash_table_size (enabled_repo_names) > 0)
+      {
+        /* We didn't find some repos */
+        GString *notfound_repos_str = g_string_new ("");
+        gboolean prev = FALSE;
+        GHashTableIter hashiter;
+        gpointer hashkey, hashvalue;
+
+        g_hash_table_iter_init (&hashiter, enabled_repo_names);
+        while (g_hash_table_iter_next (&hashiter, &hashkey, &hashvalue))
+          {
+            if (!prev)
+              prev = TRUE;
+            else
+              g_string_append_c (notfound_repos_str, ' ');
+            g_string_append (notfound_repos_str, (char*)hashkey);
+          }
+
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "Repositories specified not found in context directory %s: %s",
+                     gs_file_get_path_cached (contextdir),
+                     notfound_repos_str->str);
+        g_string_free (notfound_repos_str, TRUE);
+        goto out;
       }
   }
 
