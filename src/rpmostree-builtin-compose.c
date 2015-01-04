@@ -35,6 +35,7 @@ typedef struct {
 
 static RpmOstreeComposeCommand compose_subcommands[] = {
   { "tree", rpmostree_compose_builtin_tree },
+  { "dockerimages", rpmostree_compose_builtin_dockerimages },
   { "sign", rpmostree_compose_builtin_sign },
   { NULL, NULL }
 };

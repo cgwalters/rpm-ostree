@@ -73,4 +73,8 @@ _rpmostree_jsonutil_append_string_array_to (JsonObject   *object,
 GHashTable *
 _rpmostree_jsonutil_jsarray_strings_to_set (JsonArray  *array);
 
+JsonObject *
+_rpmostree_jsonutil_object_require_object_element (JsonObject     *object,
+                                                   const char     *member_name,
+                                                   GError        **error);
 

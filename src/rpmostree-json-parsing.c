@@ -236,3 +236,28 @@ _rpmostree_jsonutil_jsarray_strings_to_set (JsonArray  *array)
   
   return ret;
 }
+
+JsonObject *
+_rpmostree_jsonutil_object_require_object_element (JsonObject     *object,
+                                                   const char     *member_name,
+                                                   GError        **error)
+{
+  JsonNode *node = json_object_get_member (object, member_name);
+
+  if (node != NULL)
+    {
+      if (!JSON_NODE_HOLDS_OBJECT (node))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Member '%s' is not an object", member_name);
+          return NULL;
+        }
+      return json_node_get_object (node);
+    }
+  else
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Object is missing member '%s'", member_name);
+      return NULL;
+    }
+}

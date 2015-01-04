@@ -81,6 +81,7 @@ rpm_ostree_SOURCES = src/main.c \
 if BUILDOPT_COMPOSE_TOOLING
 rpm_ostree_SOURCES += \
 	src/rpmostree-compose-builtin-tree.c \
+	src/rpmostree-compose-builtin-dockerimages.c \
 	src/rpmostree-compose-builtin-sign.c \
 	src/rpmostree-builtin-compose.c \
 	$(NULL)
