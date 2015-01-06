@@ -398,14 +398,21 @@ rpmostree_compose_builtin_dockerimages (int             argc,
         GHashTable *image_packages = hashvalue;
         GHashTableIter subhashiter;
         gpointer subhashkey, subhashvalue;
+        gboolean found_one = FALSE;
 
         g_hash_table_iter_init (&subhashiter, image_packages);
         while (g_hash_table_iter_next (&subhashiter, &subhashkey, &subhashvalue))
           {
             const char *pkg = subhashkey;
             if (!g_hash_table_lookup (common_base, pkg))
-              g_print ("%s: %s\n", imageid, pkg);
+              {
+                g_print ("%s: %s\n", imageid, pkg);
+                found_one = TRUE;
+              }
           }
+        
+        if (!found_one)
+          g_print ("%s: (empty)\n", imageid);
       }
   }
   
