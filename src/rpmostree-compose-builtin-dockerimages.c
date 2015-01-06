@@ -221,6 +221,9 @@ rpmostree_compose_builtin_dockerimages (int             argc,
   gs_unref_object GFile *target_root = NULL;
   gs_unref_object GFile *imgdef_path = NULL;
   gs_unref_object JsonParser *imgdef_parser = NULL;
+  gs_unref_ptrarray GHashTable *common_base = NULL;
+  gs_unref_ptrarray GHashTable *image_packages =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_hash_table_unref);
   gboolean workdir_is_tmp = FALSE;
   guint progress_sigid;
   gs_unref_object HifContext *hifctx = NULL;
@@ -332,15 +335,77 @@ rpmostree_compose_builtin_dockerimages (int             argc,
           HyPackage pkg;
           guint i;
           gs_unref_ptrarray GPtrArray *nevras = g_ptr_array_new_with_free_func (g_free);
+          gboolean is_first = FALSE;
 
           pkglist = hy_goal_list_installs (hif_context_get_goal (hifctx));
 
-          FOR_PACKAGELIST(pkg, pkglist, i)
+          if (!common_base)
             {
-              gs_free char *nevra = hy_package_get_nevra (pkg);
-              g_print (" %s: %s\n", imageid, nevra);
+              is_first = TRUE;
+              common_base = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
+              FOR_PACKAGELIST(pkg, pkglist, i)
+                {
+                  char *nevra = hy_package_get_nevra (pkg);
+                  g_hash_table_add (common_base, nevra);
+                }
             }
+
+          { GHashTableIter hashiter;
+            gpointer hashkey, hashvalue;
+            gs_unref_hashtable GHashTable *pkgset =
+              g_hash_table_new_full (g_str_hash, g_str_equal, NULL, g_free);
+
+            FOR_PACKAGELIST(pkg, pkglist, i)
+              {
+                char *nevra = hy_package_get_nevra (pkg);
+                g_hash_table_add (pkgset, nevra);
+              }
+
+            g_hash_table_insert (image_packages, g_strdup (imageid), g_hash_table_ref (pkgset));
+
+            if (!is_first)
+              {
+                g_hash_table_iter_init (&hashiter, common_base);
+                while (g_hash_table_iter_next (&hashiter, &hashkey, &hashvalue))
+                  {
+                    const char *pkg = hashkey;
+                    if (!g_hash_table_lookup (pkgset, pkg))
+                      {
+                        g_hash_table_iter_remove (&hashiter);
+                        g_print ("-common: %s\n", pkg);
+                      }
+                  }
+              }
+          }
         }
+      }
+  }
+
+  { GHashTableIter hashiter;
+    gpointer hashkey, hashvalue;
+
+    g_hash_table_iter_init (&hashiter, common_base);
+    while (g_hash_table_iter_next (&hashiter, &hashkey, &hashvalue))
+      {
+        const char *pkg = hashkey;
+        g_print ("common: %s\n", pkg);
+      }
+
+    g_hash_table_iter_init (&hashiter, image_packages);
+    while (g_hash_table_iter_next (&hashiter, &hashkey, &hashvalue))
+      {
+        const char *imageid = hashkey;
+        GHashTable *image_packages = hashvalue;
+        GHashTableIter subhashiter;
+        gpointer subhashkey, subhashvalue;
+
+        g_hash_table_iter_init (&subhashiter, image_packages);
+        while (g_hash_table_iter_next (&subhashiter, &subhashkey, &subhashvalue))
+          {
+            const char *pkg = subhashkey;
+            if (!g_hash_table_lookup (common_base, pkg))
+              g_print ("%s: %s\n", imageid, pkg);
+          }
       }
   }
   
