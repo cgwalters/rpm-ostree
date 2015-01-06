@@ -47,19 +47,26 @@ static char *opt_workdir;
 static gboolean opt_workdir_tmpfs;
 static gboolean opt_force_nocache;
 static char *opt_proxy;
+static char *opt_statefile;
 
 static GOptionEntry option_entries[] = {
   { "workdir", 0, 0, G_OPTION_ARG_STRING, &opt_workdir, "Working directory", "WORKDIR" },
   { "workdir-tmpfs", 0, 0, G_OPTION_ARG_NONE, &opt_workdir_tmpfs, "Use tmpfs for working state", NULL },
   { "force-nocache", 0, 0, G_OPTION_ARG_NONE, &opt_force_nocache, "Always create a new OSTree commit, even if nothing appears to have changed", NULL },
   { "proxy", 0, 0, G_OPTION_ARG_STRING, &opt_proxy, "HTTP proxy", "PROXY" },
+  { "statefile", 0, 0, G_OPTION_ARG_STRING, &opt_statefile, "Output computed state to PATH", "PATH" },
   { NULL }
 };
 
 typedef struct {
   GFile *workdir;
   GFile *contextdir;
-} RpmOstreeDockerComposeContext;
+} App;
+
+typedef struct {
+  char *imagename;
+  HifContext *context;
+} DockerImageComposeContext;
 
 static void
 on_hifstate_percentage_changed (HifState   *hifstate,
@@ -71,7 +78,7 @@ on_hifstate_percentage_changed (HifState   *hifstate,
 }
 
 static HifContext *
-setup_context (RpmOstreeDockerComposeContext    *self,
+setup_context (App    *self,
                JsonObject                       *imagedef,
                GFile                            *installroot,
                GCancellable                     *cancellable,
@@ -204,6 +211,57 @@ setup_context (RpmOstreeDockerComposeContext    *self,
   return hifctx_ret;
 }
 
+static int
+ptrarray_sort_compare_strings (gconstpointer ap,
+                               gconstpointer bp)
+{
+  char **asp = (gpointer)ap;
+  char **bsp = (gpointer)bp;
+  return strcmp (*asp, *bsp);
+}
+
+static char *
+compute_hashstate_for_image (JsonObject      *imgdef,
+                             HyPackageList    pkglist)
+{
+  GChecksum *state = g_checksum_new (G_CHECKSUM_SHA256);
+  gs_unref_object JsonGenerator *generator = json_generator_new ();
+  char *object_buf = NULL;
+  gsize len;
+  guint i;
+  HyPackage pkg;
+  gs_unref_ptrarray GPtrArray *sorted_pkgs =
+    g_ptr_array_new_with_free_func (g_free);
+
+  { JsonNode *rootnode = json_node_new (JSON_NODE_OBJECT);
+    json_node_set_object (rootnode, imgdef);
+    json_generator_set_root (generator, rootnode);
+    json_node_free (rootnode);
+  }
+  json_generator_set_pretty (generator, TRUE);
+  object_buf = json_generator_to_data (generator, &len);
+
+  g_checksum_update (state, (guint8*)object_buf, len);
+
+  FOR_PACKAGELIST(pkg, pkglist, i)
+    {
+      g_ptr_array_add (sorted_pkgs, hy_package_get_nevra (pkg));
+    }
+  g_ptr_array_sort (sorted_pkgs, ptrarray_sort_compare_strings);
+
+  for (i = 0; i < sorted_pkgs->len; i++)
+    {
+      const char *nevra = sorted_pkgs->pdata[i];
+      g_checksum_update (state, (guint8*)nevra, strlen (nevra));
+    }
+
+  { char *ret = g_strdup (g_checksum_get_string (state));
+    g_checksum_free (state);
+    return ret;
+  }
+}
+                             
+
 gboolean
 rpmostree_compose_builtin_dockerimages (int             argc,
                                         char          **argv,
@@ -212,9 +270,11 @@ rpmostree_compose_builtin_dockerimages (int             argc,
 {
   gboolean ret = FALSE;
   GOptionContext *context = g_option_context_new ("- Assemble docker images from RPMs");
-  RpmOstreeDockerComposeContext selfdata = { NULL, };
-  RpmOstreeDockerComposeContext *self = &selfdata;
+  App selfdata = { NULL, };
+  App *self = &selfdata;
   JsonNode *imgdef_rootval = NULL;
+  JsonNode *output_rootval = NULL;
+  JsonObject *output_root = NULL;
   JsonObject *imgdef = NULL;
   JsonObject *images = NULL;
   gs_unref_object GFile *cachedir = NULL;
@@ -224,6 +284,8 @@ rpmostree_compose_builtin_dockerimages (int             argc,
   gs_unref_ptrarray GHashTable *common_base = NULL;
   gs_unref_ptrarray GHashTable *image_packages =
     g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_hash_table_unref);
+  gs_unref_ptrarray GHashTable *image_hashes =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   gboolean workdir_is_tmp = FALSE;
   guint progress_sigid;
   gs_unref_object HifContext *hifctx = NULL;
@@ -236,6 +298,13 @@ rpmostree_compose_builtin_dockerimages (int             argc,
       g_printerr ("usage: rpm-ostree compose dockerimages IMAGESDEF.json\n");
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "Option processing failed");
+      goto out;
+    }
+
+  if (!opt_statefile)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "--statefile is required");
       goto out;
     }
 
@@ -292,6 +361,7 @@ rpmostree_compose_builtin_dockerimages (int             argc,
         gs_unref_object HifContext *hifctx = NULL;
         gs_unref_object GFile *targetroot = g_file_get_child (self->workdir, "rootfs");
         gs_unref_ptrarray GPtrArray *packages = NULL;
+        gs_free char *imghash = NULL;
 
         if (!gs_shutil_rm_rf (targetroot, cancellable, error))
           goto out;
@@ -350,6 +420,9 @@ rpmostree_compose_builtin_dockerimages (int             argc,
                 }
             }
 
+          g_hash_table_insert (image_hashes, g_strdup (imageid),
+                               compute_hashstate_for_image (imgdef, pkglist));
+
           { GHashTableIter hashiter;
             gpointer hashkey, hashvalue;
             gs_unref_hashtable GHashTable *pkgset =
@@ -371,8 +444,8 @@ rpmostree_compose_builtin_dockerimages (int             argc,
                     const char *pkg = hashkey;
                     if (!g_hash_table_lookup (pkgset, pkg))
                       {
-                        g_hash_table_iter_remove (&hashiter);
                         g_print ("-common: %s\n", pkg);
+                        g_hash_table_iter_remove (&hashiter);
                       }
                   }
               }
@@ -381,15 +454,27 @@ rpmostree_compose_builtin_dockerimages (int             argc,
       }
   }
 
+  output_rootval = json_node_new (JSON_NODE_OBJECT);
+  output_root = json_object_new ();
+  json_node_set_object (output_rootval, output_root);
+
   { GHashTableIter hashiter;
     gpointer hashkey, hashvalue;
+    JsonObject *common = json_object_new ();
+    JsonArray *common_packages = json_array_new ();
+    JsonObject *images_out = json_object_new ();
+
+    json_object_set_object_member (output_root, "common", common);
+    json_object_set_object_member (output_root, "images", images_out);
 
     g_hash_table_iter_init (&hashiter, common_base);
     while (g_hash_table_iter_next (&hashiter, &hashkey, &hashvalue))
       {
         const char *pkg = hashkey;
-        g_print ("common: %s\n", pkg);
+        json_array_add_string_element (common_packages, pkg);
       }
+
+    json_object_set_array_member (common, "packages", common_packages);
 
     g_hash_table_iter_init (&hashiter, image_packages);
     while (g_hash_table_iter_next (&hashiter, &hashkey, &hashvalue))
@@ -398,7 +483,17 @@ rpmostree_compose_builtin_dockerimages (int             argc,
         GHashTable *image_packages = hashvalue;
         GHashTableIter subhashiter;
         gpointer subhashkey, subhashvalue;
-        gboolean found_one = FALSE;
+        const char *hashstate;
+        JsonObject *imgout = json_object_new ();
+        JsonArray *imgout_packages = json_array_new ();
+
+        json_object_set_object_member (images_out, imageid, imgout);
+
+        hashstate = g_hash_table_lookup (image_hashes, imageid);
+        g_assert (hashstate);
+        json_object_set_string_member (imgout, "hashstate", hashstate);
+
+        json_object_set_array_member (imgout, "packages", imgout_packages);
 
         g_hash_table_iter_init (&subhashiter, image_packages);
         while (g_hash_table_iter_next (&subhashiter, &subhashkey, &subhashvalue))
@@ -406,14 +501,20 @@ rpmostree_compose_builtin_dockerimages (int             argc,
             const char *pkg = subhashkey;
             if (!g_hash_table_lookup (common_base, pkg))
               {
-                g_print ("%s: %s\n", imageid, pkg);
-                found_one = TRUE;
+                json_array_add_string_element (imgout_packages, pkg);
               }
           }
-        
-        if (!found_one)
-          g_print ("%s: (empty)\n", imageid);
       }
+  }
+
+  { gs_unref_object JsonGenerator *generator = json_generator_new ();
+    gs_free char *outbuf = NULL;
+    gsize len;
+
+    json_generator_set_root (generator, output_rootval);
+    json_generator_set_pretty (generator, TRUE);
+    outbuf = json_generator_to_data (generator, &len);
+    g_print ("%s\n", outbuf);
   }
   
  out:

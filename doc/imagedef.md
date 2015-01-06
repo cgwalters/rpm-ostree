@@ -19,10 +19,16 @@ Example
 {
   "repos": ["fedora-rawhide", "username/my-cool-copr"],
 
+  "maintainer": "Colin Walters <walters@redhat.com>"
+
   "images": {
 
     "myapp1": {
       "packages": ["myapp1", "bash"]
+
+      
+
+      "cmd": "/usr/bin/foo"
     },
 
     "myapp2": {
