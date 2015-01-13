@@ -34,6 +34,7 @@
 #include <stdlib.h>
 
 #include "rpmostree-postprocess.h"
+#include "rpmostree-console-progress.h"
 #include "rpmostree-passwd-util.h"
 #include "rpmostree-libcontainer.h"
 #include "rpmostree-cleanup.h"
@@ -1235,13 +1236,20 @@ rpmostree_prepare_rootfs_for_commit (GFile         *rootfs,
   return ret;
 }
 
+typedef struct {
+  int rootfs_fd;
+  guint n_content_files_and_dirs;
+  guint n_content_read;
+} ReadXattrsContext;
+
 static GVariant *
 read_xattrs_cb (OstreeRepo     *repo,
                 const char     *relpath,
                 GFileInfo      *file_info,
                 gpointer        user_data)
 {
-  int rootfs_fd = GPOINTER_TO_INT (user_data);
+  ReadXattrsContext *context = user_data;
+  int rootfs_fd = context->rootfs_fd;
   /* Hardcoded at the moment, we're only taking file caps */
   static const char *accepted_xattrs[] = { "security.capability" };
   guint i;
@@ -1281,6 +1289,12 @@ read_xattrs_cb (OstreeRepo     *repo,
             g_variant_builder_add (&builder, "(@ay@ay)", key, value);
         }
     }
+
+  context->n_content_read++;
+  { const double progressf = ((double)context->n_content_read) / context->n_content_files_and_dirs;
+    const guint progress = MIN((guint)100*progressf, 100);
+    rpmostree_console_progress_text_percent ("Committing: ", progress);
+  }
 
  out:
   if (local_error)
@@ -1353,6 +1367,9 @@ rpmostree_commit (GFile         *rootfs,
   gs_unref_object GFile *root_tree = NULL;
   gs_unref_object OstreeSePolicy *sepolicy = NULL;
   gs_fd_close int rootfs_fd = -1;
+  ReadXattrsContext xattrcontext;
+
+  memset (&xattrcontext, 0, sizeof (xattrcontext));
   
   /* hardcode targeted policy for now */
   if (enable_selinux)
@@ -1372,11 +1389,13 @@ rpmostree_commit (GFile         *rootfs,
   if (!gs_file_open_dir_fd (rootfs, &rootfs_fd, cancellable, error))
     goto out;
 
+  xattrcontext.rootfs_fd = rootfs_fd;
+
   mtree = ostree_mutable_tree_new ();
   commit_modifier = ostree_repo_commit_modifier_new (0, NULL, NULL, NULL);
   ostree_repo_commit_modifier_set_xattr_callback (commit_modifier,
                                                   read_xattrs_cb, NULL,
-                                                  GINT_TO_POINTER (rootfs_fd));
+                                                  &xattrcontext);
   if (sepolicy)
     {
       const char *policy_name = ostree_sepolicy_get_name (sepolicy);
@@ -1384,8 +1403,39 @@ rpmostree_commit (GFile         *rootfs,
       ostree_repo_commit_modifier_set_sepolicy (commit_modifier, sepolicy);
     }
 
-  if (!ostree_repo_write_directory_to_mtree (repo, rootfs, mtree, commit_modifier, cancellable, error))
-    goto out;
+  /* Determine from RPM approximately how many files we have to commit */
+  {
+    _cleanup_hysack_ HySack sack = NULL;
+    _cleanup_hypackagelist_ HyPackageList pkglist = NULL;
+    HyPackage pkg;
+    guint i;
+
+    if (!rpmostree_get_pkglist_for_root (rootfs, &sack, &pkglist,
+                                         cancellable, error))
+      {
+        g_prefix_error (error, "Reading package set: ");
+        goto out;
+      }
+
+    FOR_PACKAGELIST(pkg, pkglist, i)
+      {
+        HyStringArray pkgfiles;
+        pkgfiles = hy_package_get_files (pkg);
+        xattrcontext.n_content_files_and_dirs += hy_stringarray_length (pkgfiles);
+        hy_stringarray_free (pkgfiles);
+      }
+  }
+
+  /* --- Downloading metadata --- */
+  { _cleanup_rpmostree_console_progress_ G_GNUC_UNUSED gpointer dummy;
+
+    rpmostree_console_progress_start ();
+
+    if (!ostree_repo_write_directory_to_mtree (repo, rootfs, mtree, commit_modifier, cancellable, error))
+      goto out;
+
+  }
+
   if (!ostree_repo_write_mtree (repo, mtree, &root_tree, cancellable, error))
     goto out;
 
