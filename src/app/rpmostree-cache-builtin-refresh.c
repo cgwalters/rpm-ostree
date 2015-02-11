@@ -20,9 +20,7 @@
 
 #include "config.h"
 
-#include <libhif.h>
-#include <libhif/hif-utils.h>
-
+#include "rpmostree-hif.h"
 #include "rpmostree-cache-builtins.h"
 #include "rpmostree-util.h"
 #include "rpmostree-cleanup.h"
@@ -59,63 +57,25 @@ rpmostree_cache_builtin_refresh (int argc, char **argv, GCancellable *cancellabl
   if (!rpmostree_option_context_parse (context, option_entries, &argc, &argv, error))
     goto out;
 
-  hifctx = hif_context_new ();
-  hif_context_set_http_proxy (hifctx, g_getenv ("http_proxy"));
+  hifctx = _rpmostree_libhif_get_default ();
 
-  if (!opt_reposdir)
-    opt_reposdir = "/etc/yum.repos.d";
+  if (opt_reposdir)
+    hif_context_set_repo_dir (hifctx, opt_reposdir);
 
-  hif_context_set_repo_dir (hifctx, opt_reposdir);
-  hif_context_set_cache_dir (hifctx, "/var/cache/rpm-ostree/metadata");
-  hif_context_set_solv_dir (hifctx, "/var/cache/rpm-ostree/solv");
-  hif_context_set_lock_dir (hifctx, "/run/rpm-ostree/lock");
-
-  hif_context_set_check_disk_space (hifctx, FALSE);
-  hif_context_set_check_transaction (hifctx, FALSE);
-
-  if (!hif_context_setup (hifctx, NULL, error))
+  if (!_rpmostree_libhif_setup (hifctx, cancellable, error))
     return FALSE;
 
   if (opt_enable_repos)
     {
-      GPtrArray *sources = hif_context_get_sources (hifctx);
-      gs_unref_hashtable GHashTable *enabled_repos = g_hash_table_new (g_str_hash, g_str_equal);
       char **strviter;
-      guint i;
+
+      _rpmostree_libhif_repos_disable_all (hifctx);
 
       for (strviter = opt_enable_repos; strviter && *strviter; strviter++)
-        g_hash_table_add (enabled_repos, *strviter);
-
-      for (i = 0; i < sources->len; i++)
         {
-          HifSource *src = sources->pdata[i];
-          const char *repoid = hif_source_get_id (src);
-
-          if (!g_hash_table_contains (enabled_repos, repoid))
-            hif_source_set_enabled (src, HIF_SOURCE_ENABLED_NONE);
-          else
-            {
-              hif_source_set_enabled (src, HIF_SOURCE_ENABLED_PACKAGES);
-              g_hash_table_remove (enabled_repos, repoid);
-            }
-        }
-
-      if (g_hash_table_size (enabled_repos) > 0)
-        {
-          GHashTableIter hashiter;
-          gpointer hkey, hvalue;
-          GString *err = g_string_new ("Repositories enabled but not found:");
-
-          g_hash_table_iter_init (&hashiter, enabled_repos);
-          while (g_hash_table_iter_next (&hashiter, &hkey, &hvalue))
-            {
-              g_string_append_c (err, ' ');
-              g_string_append (err, (char*)hkey);
-            }
-          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                               err->str);
-          g_string_free (err, TRUE);
-          goto out;
+          const char *repoid = *strviter;
+          if (!hif_context_repo_enable (hifctx, repoid, error))
+            goto out;
         }
     }
 
