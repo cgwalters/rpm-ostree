@@ -110,7 +110,11 @@ rpmostree_builtin_cache (int argc, char **argv, GCancellable *cancellable, GErro
       context = cache_option_context_new_with_commands ();
 
       /* This will not return for some options (e.g. --version). */
-      if (rpmostree_option_context_parse (context, NULL, &argc, &argv, error))
+      if (rpmostree_option_context_parse (context, NULL, &argc, &argv,
+                                          RPM_OSTREE_BUILTIN_FLAG_NONE,
+                                          cancellable,
+                                          NULL,
+                                          error))
         {
           if (subcommand_name == NULL)
             {

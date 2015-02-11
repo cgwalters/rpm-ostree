@@ -83,3 +83,4 @@ _rpmostree_libhif_repos_disable_all (HifContext    *context)
       hif_source_set_enabled (src, HIF_SOURCE_ENABLED_NONE);
     }
 }
+

@@ -54,7 +54,11 @@ rpmostree_cache_builtin_refresh (int argc, char **argv, GCancellable *cancellabl
   gs_unref_object HifContext *hifctx = NULL;
 
   context = g_option_context_new ("Update cache for enabled repositories");
-  if (!rpmostree_option_context_parse (context, option_entries, &argc, &argv, error))
+  if (!rpmostree_option_context_parse (context, option_entries, &argc, &argv,
+                                       RPM_OSTREE_BUILTIN_FLAG_NONE,
+                                       cancellable,
+                                       NULL,
+                                       error))
     goto out;
 
   hifctx = _rpmostree_libhif_get_default ();
