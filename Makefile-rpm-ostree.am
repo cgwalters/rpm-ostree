@@ -29,6 +29,8 @@ rpm_ostree_SOURCES = src/app/main.c \
 	src/app/rpmostree-builtin-rebase.c \
 	src/app/rpmostree-builtin-status.c \
 	src/app/rpmostree-builtin-db.c \
+	src/app/rpmostree-builtin-cache.c \
+	src/app/rpmostree-cache-builtin-refresh.c \
 	src/app/rpmostree-db-builtin-diff.c \
 	src/app/rpmostree-db-builtin-list.c \
 	src/app/rpmostree-db-builtin-version.c \
