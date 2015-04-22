@@ -90,7 +90,7 @@
       <!--
            The refspec we created.
       -->
-      <arg name="refspec" type="o" direction="out"/>
+      <arg name="refspec_path" type="o" direction="out"/>
     </method>
 
     <!--
@@ -99,7 +99,7 @@
 
     <method name="GetUpgradeRefSpec">
       <arg name="options" type="a{sv}" direction="in"/>
-      <arg name="refspec" type="o" direction="out"/>
+      <arg name="refspec_path" type="o" direction="out"/>
     </method>
 
     <signal name="UpdateCompleted">
