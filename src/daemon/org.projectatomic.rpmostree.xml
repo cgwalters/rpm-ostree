@@ -3,7 +3,7 @@
 "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
 <node name="/" xmlns:doc="http://www.freedesktop.org/dbus/1.0/doc.dtd">
 
-  <interface name="org.projectatomic.rpmostree.Manager">
+  <interface name="org.projectatomic.rpmostree1.Manager">
     <property name="DefaultSysroot" type="o" access="read"/>
 
     <!--
@@ -18,7 +18,7 @@
     </method>
   </interface>
 
-  <interface name="org.projectatomic.rpmostree.Sysroot">
+  <interface name="org.projectatomic.rpmostree1.Sysroot">
 
     <!--
       The basic interface for working with an OSTree.
@@ -109,8 +109,7 @@
 
   </interface>
 
-  <!-- On /org/projectatomic/rpmostree/RefSpecs/* -->
-  <interface name="org.projectatomic.rpmostree.RefSpec">
+  <interface name="org.projectatomic.rpmostree1.RefSpec">
     <property name="Head" type="s" access="read"/>
     <property name="Ref" type="s" access="read"/>
     <property name="RemoteName" type="s" access="read"/>
@@ -211,8 +210,7 @@
 
   </interface>
 
-  <!-- On /org/projectatomic/rpmostree/Deployments/* -->
-  <interface name="org.projectatomic.rpmostree.Deployment">
+  <interface name="org.projectatomic.rpmostree1.Deployment">
     <property name="OSName" type="s" access="read"/>
     <property name="Checksum" type="s" access="read"/>
     <property name="Commit" type="s" access="read"/>
