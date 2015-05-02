@@ -28,4 +28,11 @@ gboolean
 rpmostree_print_treepkg_diff (OstreeSysroot    *sysroot,
                               GCancellable     *cancellable,
                               GError          **error);
+
+void
+rpmostree_print_pkg_diff_variant_by_name (GVariant *variant);
+
+void
+rpmostree_print_pkg_diff_variant_by_type (GVariant *variant);
+
 G_END_DECLS

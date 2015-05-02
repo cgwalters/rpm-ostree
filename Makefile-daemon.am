@@ -40,11 +40,13 @@ librpmostreed_la_CFLAGS = \
 	-DG_LOG_DOMAIN=\"rpm-ostree\" \
 	-I$(srcdir)/src/daemon \
 	-I$(srcdir)/libglnx \
+  -I$(srcdir)/src/lib \
 	$(NULL)
 
 librpmostreed_la_LIBADD = \
 	$(AM_LDFLAGS) \
 	$(PKGDEP_RPMOSTREE_LIBS) \
+  librpmostree-1.la \
 	$(CAP_LIBS)
 	$(NULL)
 

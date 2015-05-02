@@ -44,3 +44,8 @@ const char *rpm_ostree_package_get_evr (RpmOstreePackage *p);
 _RPMOSTREE_EXTERN
 const char *rpm_ostree_package_get_arch (RpmOstreePackage *p);
 
+_RPMOSTREE_EXTERN
+int rpm_ostree_package_cmp (RpmOstreePackage *p, RpmOstreePackage *p2);
+
+_RPMOSTREE_EXTERN
+GVariant * rpm_ostree_package_to_variant (RpmOstreePackage *package);

@@ -134,7 +134,7 @@ rpmostree_builtin_rebase (int             argc,
                                                       error))
         goto out;
 
-      g_print ("diff will be here: %s\n", g_variant_print (out_difference, TRUE));
+      rpmostree_print_pkg_diff_variant_by_type (out_difference);
       g_print ("Run \"systemctl reboot\" to start a reboot\n");
     }
   else

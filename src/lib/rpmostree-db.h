@@ -28,7 +28,7 @@ G_BEGIN_DECLS
 _RPMOSTREE_EXTERN GPtrArray *rpm_ostree_db_query_all (OstreeRepo               *repo,
                                                       const char               *ref,
                                                       GCancellable             *cancellable,
-                                                      GError                  **error);
+                                                      GError                   **error);
 
 _RPMOSTREE_EXTERN gboolean rpm_ostree_db_diff (OstreeRepo               *repo,
                                                const char               *orig_ref,
@@ -39,5 +39,24 @@ _RPMOSTREE_EXTERN gboolean rpm_ostree_db_diff (OstreeRepo               *repo,
                                                GPtrArray               **out_modified_new,
                                                GCancellable             *cancellable,
                                                GError                  **error);
+
+_RPMOSTREE_EXTERN GVariant * rpm_ostree_db_diff_variant (OstreeRepo *repo,
+                                                         const char *from_ref,
+                                                         const char *to_ref,
+                                                         GCancellable *cancellable,
+                                                         GError **error);
+
+_RPMOSTREE_EXTERN int rpm_ostree_db_diff_variant_compare_by_name (const void *v1,
+                                                                  const void *v2);
+
+_RPMOSTREE_EXTERN int rpm_ostree_db_diff_variant_compare_by_type (const void *v1,
+                                                                  const void *v2);
+
+typedef enum {
+  RPM_OSTREE_PACKAGE_ADDED,
+  RPM_OSTREE_PACKAGE_REMOVED,
+  RPM_OSTREE_PACKAGE_UPGRADED,
+  RPM_OSTREE_PACKAGE_DOWNGRADED
+} RpmOstreePackageDiffTypes;
 
 G_END_DECLS

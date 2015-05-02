@@ -104,3 +104,124 @@ rpmostree_print_treepkg_diff (OstreeSysroot    *sysroot,
  out:
   return ret;
 }
+
+static void
+get_values_from_diff_variant (GVariant *v,
+                              gchar **out_name,
+                              guint *out_type,
+                              gchar **out_prev_evra,
+                              gchar **out_cur_evra)
+{
+  gs_unref_variant GVariant *options = NULL;
+
+  gs_free gchar *prev_evra = NULL;
+  gs_free gchar *cur_evra = NULL;
+  gs_free gchar *prev_evr = NULL;
+  gs_free gchar *cur_evr = NULL;
+  gs_free gchar *prev_arch = NULL;
+  gs_free gchar *cur_arch = NULL;
+
+  g_variant_get_child (v, 0, "s", out_name),
+  g_variant_get_child (v, 1, "u", out_type);
+  options = g_variant_get_child_value (v, 2);
+
+  g_variant_lookup (options, "PreviousPackage",
+                    "(sss)", NULL, &prev_evr, &prev_arch);
+  g_variant_lookup (options, "NewPackage",
+                    "(sss)", NULL, &cur_evr, &cur_arch);
+
+  if (prev_evr && prev_arch)
+    prev_evra = g_strdup_printf ("%s.%s", prev_evr, prev_arch);
+
+  if (cur_evr && cur_arch)
+    cur_evra = g_strdup_printf ("%s.%s", cur_evr, cur_arch);
+
+  gs_transfer_out_value (out_prev_evra, &prev_evra);
+  gs_transfer_out_value (out_cur_evra, &cur_evra);
+}
+
+void
+rpmostree_print_pkg_diff_variant_by_type (GVariant *variant)
+{
+  // This is the default for now so no need to sort;
+
+  gint prev_type = -1;
+  guint i;
+  guint n = g_variant_n_children (variant);
+
+  for (i = 0; i < n; i++)
+    {
+      gs_free gchar *prev_evra = NULL;
+      gs_free gchar *cur_evra = NULL;
+      gs_free gchar *name = NULL;
+      gs_unref_variant GVariant *v = NULL;
+      guint type;
+
+      v = g_variant_get_child_value (variant, i);
+      get_values_from_diff_variant (v, &name, &type,
+                                    &prev_evra, &cur_evra);
+
+      if (prev_type != type)
+        {
+          switch (type)
+            {
+              case RPM_OSTREE_PACKAGE_ADDED:
+                g_print ("Added:\n");
+                break;
+              case RPM_OSTREE_PACKAGE_REMOVED:
+                g_print ("Removed:\n");
+                break;
+              case RPM_OSTREE_PACKAGE_DOWNGRADED:
+                g_print ("Downgraded:\n");
+                break;
+              default:
+                g_print ("Upgraded:\n");
+            }
+        }
+
+      prev_type = type;
+
+      if (prev_evra && cur_evra)
+          g_print ("  %s %s -> %s\n", name, prev_evra, cur_evra);
+      else if (cur_evra)
+          g_print ("  %s-%s\n", name, cur_evra);
+      else
+          g_print ("  %s-%s\n", name, prev_evra);
+    }
+}
+
+void
+rpmostree_print_pkg_diff_variant_by_name (GVariant *variant)
+{
+  guint i;
+  guint n = g_variant_n_children (variant);
+  g_autoptr(GPtrArray) l = NULL;
+
+  // resort variant array by name
+  l = g_ptr_array_new_with_free_func((GDestroyNotify) g_variant_unref);
+  for (i = 0; i < n; i++)
+    {
+      GVariant *v = g_variant_get_child_value (variant, i);
+      g_ptr_array_add (l, v);
+    }
+  g_ptr_array_sort (l, rpm_ostree_db_diff_variant_compare_by_name);
+
+  for (i = 0; i < n; i++)
+    {
+      gs_free gchar *prev_evra = NULL;
+      gs_free gchar *cur_evra = NULL;
+      gs_free gchar *name = NULL;
+      guint type;
+      GVariant *v = l->pdata[i];
+
+      get_values_from_diff_variant (v, &name, &type,
+                                    &prev_evra, &cur_evra);
+
+      if (prev_evra && cur_evra)
+          g_print ("!%s-%s\n=%s-%s\n", name, prev_evra, name, cur_evra);
+      else if (cur_evra)
+          g_print ("+%s-%s\n", name, cur_evra);
+      else
+          g_print ("-%s-%s\n", name, prev_evra);
+    }
+}
