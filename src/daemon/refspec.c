@@ -470,7 +470,7 @@ _pull_rpm_callback (GObject *source_object,
   else
     message = g_strdup ("Pull Complete.");
 
-  manager_end_update_operation (manager_get (), success, message, TRUE);
+  manager_end_update_operation (manager_get (), success, message, success);
 
   g_clear_error (&error);
 }
