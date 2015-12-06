@@ -40,7 +40,7 @@ static RpmOstreeCommand commands[] = {
   { "db", rpmostree_builtin_db },
   { "deploy", rpmostree_builtin_deploy },
   { "upgrade", rpmostree_builtin_upgrade },
-  { "pkg-add", rpmostree_builtin_pkgadd },
+  { "pkg-add", rpmostree_builtin_pkg_add },
   { "rebase", rpmostree_builtin_rebase },
   { "cache", rpmostree_builtin_cache },
   { "rollback", rpmostree_builtin_rollback },
