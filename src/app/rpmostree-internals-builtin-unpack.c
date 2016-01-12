@@ -36,6 +36,7 @@
 #include "rpmostree-cleanup.h"
 #include "rpmostree-libbuiltin.h"
 #include "rpmostree-rpm-util.h"
+#include "rpmostree-unpacker.h"
 
 #include "libgsystem.h"
 
@@ -51,13 +52,10 @@ rpmostree_internals_builtin_unpack (int             argc,
 {
   int exit_status = EXIT_FAILURE;
   GOptionContext *context = g_option_context_new ("ROOT RPM");
-  rpmts ts = NULL;
-  rpmfi fi = NULL;
-  int r;
-  FD_t rpmfd = NULL;
-  Header hdr;
+  glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
   const char *rpmpath;
   glnx_fd_close int rootfs_fd = -1;
+  glnx_fd_close int rpm_fd = -1;
   
   if (!rpmostree_option_context_parse (context,
                                        option_entries,
@@ -86,83 +84,21 @@ rpmostree_internals_builtin_unpack (int             argc,
 
   rpmpath = argv[2];
 
-  ts = rpmtsCreate ();
-  rpmtsSetVSFlags (ts, _RPMVSF_NOSIGNATURES);
-
-  rpmfd = Fopen (rpmpath, "r.fdio");
-  if (rpmfd == NULL)
+  if ((rpm_fd = openat (AT_FDCWD, rpmpath, O_RDONLY | O_CLOEXEC | O_NOCTTY)) < 0)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Failed to open %s", rpmpath);
-      goto out;
-    }
-  if (Ferror (rpmfd))
-    {
-      g_set_error (error,
-                   G_IO_ERROR,
-                   G_IO_ERROR_FAILED,
-                   "Opening %s: %s",
-                   rpmpath,
-                   Fstrerror (rpmfd));
-      goto out;
-    }
-  
-  if ((r = rpmReadPackageFile (ts, rpmfd, rpmpath, &hdr)) != RPMRC_OK)
-    {
-      g_set_error (error,
-                   G_IO_ERROR,
-                   G_IO_ERROR_FAILED,
-                   "Verification of %s failed",
-                    rpmpath);
+      glnx_set_error_from_errno (error);
+      g_prefix_error (error, "Opening %s: ", rpmpath);
       goto out;
     }
 
-  fi = rpmfiNew (ts, hdr, RPMTAG_BASENAMES, (RPMFI_NOHEADER | RPMFI_FLAGS_INSTALL));
-  fi = rpmfiInit (fi, 0);
-  while (rpmfiNext (fi) >= 0)
-    {
-      rpmfileAttrs fflags = rpmfiFFlags (fi);
-      rpm_mode_t fmode = rpmfiFMode (fi);
-      rpm_loff_t fsize = rpmfiFSize (fi);
-      const char *fn = rpmfiFN (fi); 
-      const char *fuser = rpmfiFUser (fi);
-      const char *fgroup = rpmfiFGroup (fi);
-      const char *fcaps = rpmfiFCaps (fi);
+  unpacker = rpmostree_unpacker_new_at (AT_FDCWD, rpmpath, 0, error);
+  if (!unpacker)
+    goto out;
 
-      g_print ("%s %s:%s mode=%u size=%" G_GUINT64_FORMAT " attrs=%u",
-               fn, fuser, fgroup, fmode, (guint64) fsize, fflags);
-      if (fcaps)
-        g_print (" fcaps=\"%s\"", fcaps);
-      g_print ("\n");
-
-      if (S_ISDIR (fmode))
-        {
-        }
-      else if (S_ISLNK (fmode))
-        {
-        }
-      else if (S_ISREG (fmode))
-        {
-        }
-      else
-        {
-          g_set_error (error,
-                       G_IO_ERROR,
-                       G_IO_ERROR_FAILED,
-                       "RPM %s contains non-regular/non-symlink file %s",
-                       rpmpath,
-                       fn);
-          goto out;
-        }
-    }
+  if (!rpmostree_unpacker_unpack_to_dfd (unpacker, rootfs_fd, cancellable, error))
+    goto out;
 
   exit_status = EXIT_SUCCESS;
  out:
-  if (fi)
-    rpmfiFree (fi);
-  if (rpmfd)
-    Fclose (rpmfd);
-  if (ts)
-    rpmtsFree (ts);
   return exit_status;
 }

@@ -944,3 +944,4 @@ rpmostree_print_transaction (HifContext   *hifctx)
         }
     }
 }
+

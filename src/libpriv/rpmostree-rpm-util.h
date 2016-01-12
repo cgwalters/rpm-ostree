@@ -120,3 +120,5 @@ rpmostree_get_pkglist_for_root (int               dfd,
 void
 rpmostree_print_transaction (HifContext   *context);
 
+struct archive *
+rpmostree_rpm2cpio (int fd, GError **error);
