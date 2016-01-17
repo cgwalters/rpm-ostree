@@ -40,12 +40,14 @@
 
 #include "libgsystem.h"
 
-gboolean opt_suid_fcaps = FALSE;
-gboolean opt_owner = FALSE;
+static gboolean opt_suid_fcaps = FALSE;
+static gboolean opt_owner = FALSE;
+static char *opt_to_ostree_repo = NULL;
 
 static GOptionEntry option_entries[] = {
   { "suid-fcaps", 0, 0, G_OPTION_ARG_NONE, &opt_suid_fcaps, "Enable setting suid/sgid and capabilities", NULL },
   { "owner", 0, 0, G_OPTION_ARG_NONE, &opt_owner, "Enable chown", NULL },
+  { "to-ostree-repo", 0, 0, G_OPTION_ARG_STRING, &opt_to_ostree_repo, "Interpret TARGET as ostree branch name in REPO", "REPO" },
   { NULL }
 };
 
@@ -59,8 +61,10 @@ rpmostree_internals_builtin_unpack (int             argc,
   GOptionContext *context = g_option_context_new ("ROOT RPM");
   RpmOstreeUnpackerFlags flags = 0;
   glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
+  const char *to_ostree_commit = NULL;
   const char *rpmpath;
   glnx_fd_close int rootfs_fd = -1;
+  glnx_unref_object OstreeRepo *ostree_repo = NULL;
   
   if (!rpmostree_option_context_parse (context,
                                        option_entries,
@@ -73,12 +77,25 @@ rpmostree_internals_builtin_unpack (int             argc,
 
   if (argc < 3)
     {
-      rpmostree_usage_error (context, "ROOT and RPM must be specified", error);
+      rpmostree_usage_error (context, "TARGET and RPM must be specified", error);
       goto out;
     }
-  
-  if (!glnx_opendirat (AT_FDCWD, argv[1], TRUE, &rootfs_fd, error))
-    goto out;
+
+  if (opt_to_ostree_repo)
+    {
+      g_autoptr(GFile) to_ostree_repo_file = g_file_new_for_path (opt_to_ostree_repo);
+
+      to_ostree_commit = argv[1];
+
+      ostree_repo = ostree_repo_new (to_ostree_repo_file);
+      if (!ostree_repo_open (ostree_repo, cancellable, error))
+        goto out;
+    }
+  else
+    {
+      if (!glnx_opendirat (AT_FDCWD, argv[1], TRUE, &rootfs_fd, error))
+        goto out;
+    }
 
   rpmpath = argv[2];
 
@@ -94,8 +111,20 @@ rpmostree_internals_builtin_unpack (int             argc,
   if (!unpacker)
     goto out;
 
-  if (!rpmostree_unpacker_unpack_to_dfd (unpacker, rootfs_fd, cancellable, error))
-    goto out;
+  if (to_ostree_commit)
+    {
+      g_autofree char *checksum = NULL;
+      if (!rpmostree_unpacker_unpack_to_ostree (unpacker, ostree_repo, NULL,
+                                                &checksum, cancellable, error))
+        goto out;
+      g_print ("Imported %s to %s -> %s\n",
+               rpmpath, rpmostree_unpacker_get_ostree_branch (unpacker), checksum);
+    }
+  else
+    {
+      if (!rpmostree_unpacker_unpack_to_dfd (unpacker, rootfs_fd, cancellable, error))
+        goto out;
+    }
 
   exit_status = EXIT_SUCCESS;
  out:

@@ -46,3 +46,12 @@ gboolean rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *unpacker,
                                            int                dfd,
                                            GCancellable      *cancellable,
                                            GError           **error);
+
+const char *rpmostree_unpacker_get_ostree_branch (RpmOstreeUnpacker *unpacker);
+
+gboolean rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *unpacker,
+                                              OstreeRepo        *repo,
+                                              OstreeSePolicy    *sepolicy,
+                                              char             **out_commit,
+                                              GCancellable      *cancellable,
+                                              GError           **error);

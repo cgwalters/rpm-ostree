@@ -33,6 +33,7 @@
 #include <grp.h>
 #include <sys/capability.h>
 #include "rpmostree-unpacker.h"
+#include "rpmostree-ostree-libarchive-copynpaste.h"
 #include <rpm/rpmlib.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfi.h>
@@ -56,6 +57,9 @@ struct RpmOstreeUnpacker
   rpmfi fi;
   GHashTable *fscaps;
   RpmOstreeUnpackerFlags flags;
+
+  OstreeRepo *ostree_cache;
+  char *ostree_branch;
 };
 
 G_DEFINE_TYPE(RpmOstreeUnpacker, rpmostree_unpacker, G_TYPE_OBJECT)
@@ -78,6 +82,8 @@ rpmostree_unpacker_finalize (GObject *object)
     (void) rpmfiFree (self->fi);
   if (self->owns_fd)
     (void) close (self->fd);
+  g_clear_object (&self->ostree_cache);
+  g_free (&self->ostree_branch);
   
   G_OBJECT_CLASS (rpmostree_unpacker_parent_class)->finalize (object);
 }
@@ -277,17 +283,11 @@ path_relative (const char *src)
   return src;
 }
 
-gboolean
-rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
-                                  int                rootfs_fd,
-                                  GCancellable      *cancellable,
-                                  GError           **error)
+static GHashTable *
+build_rpmfi_overrides (RpmOstreeUnpacker *self)
 {
-  gboolean ret = FALSE;
   g_autoptr(GHashTable) rpmfi_overrides = NULL;
-  g_autoptr(GHashTable) hardlinks =
-    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
-  int i = 0;
+  int i;
 
   /* Right now as I understand it, we need the owner user/group and
    * possibly filesystem capabilities from the header.
@@ -312,6 +312,44 @@ rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
       }
     }
       
+  return g_steal_pointer (&rpmfi_overrides);
+}
+
+static gboolean
+next_archive_entry (struct archive *archive,
+                    struct archive_entry **out_entry,
+                    GError **error)
+{
+  int r;
+
+  r = archive_read_next_header (archive, out_entry);
+  if (r == ARCHIVE_EOF)
+    {
+      *out_entry = NULL;
+      return TRUE;
+    }
+  else if (r != ARCHIVE_OK)
+    {
+      propagate_libarchive_error (error, archive);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+gboolean
+rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
+                                  int                rootfs_fd,
+                                  GCancellable      *cancellable,
+                                  GError           **error)
+{
+  gboolean ret = FALSE;
+  g_autoptr(GHashTable) rpmfi_overrides = NULL;
+  g_autoptr(GHashTable) hardlinks =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+
+  rpmfi_overrides = build_rpmfi_overrides (self);
+
   while (TRUE)
     {
       int r;
@@ -325,16 +363,13 @@ rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
       const char *hardlink;
       rpmfi fi = NULL;
 
-      r = archive_read_next_header (self->archive, &entry);
-      if (r == ARCHIVE_EOF)
-        {
-          break;
-        }
-      else if (r != ARCHIVE_OK)
-        {
-          propagate_libarchive_error (error, self->archive);
-          goto out;
-        }
+      if (g_cancellable_set_error_if_cancelled (cancellable, error))
+        return FALSE;
+
+      if (!next_archive_entry (self->archive, &entry, error))
+        goto out;
+      if (entry == NULL)
+        break;
 
       fn = path_relative (archive_entry_pathname (entry));
 
@@ -513,3 +548,250 @@ rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
  out:
   return ret;
 }
+
+const char *
+rpmostree_unpacker_get_ostree_branch (RpmOstreeUnpacker *self)
+{
+  if (!self->ostree_branch)
+    self->ostree_branch = g_strconcat ("rpmcache-", headerGetAsString(self->hdr, RPMTAG_NEVRA), NULL);
+
+  return self->ostree_branch;
+}
+
+static gboolean
+write_directory_meta (OstreeRepo   *repo,
+                      GFileInfo    *file_info,
+                      GVariant     *xattrs,
+                      char        **out_checksum,
+                      GCancellable *cancellable,
+                      GError      **error)
+{
+  gboolean ret = FALSE;
+  g_autoptr(GVariant) dirmeta = NULL;
+  g_autofree guchar *csum = NULL;
+
+  if (g_cancellable_set_error_if_cancelled (cancellable, error))
+    return FALSE;
+
+  dirmeta = ostree_create_directory_metadata (file_info, xattrs);
+
+  if (!ostree_repo_write_metadata (repo, OSTREE_OBJECT_TYPE_DIR_META, NULL,
+                                   dirmeta, &csum, cancellable, error))
+    goto out;
+
+  ret = TRUE;
+  *out_checksum = ostree_checksum_from_bytes (csum);
+ out:
+  return ret;
+}
+
+static gboolean
+import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
+                                       OstreeRepo        *repo,
+                                       OstreeSePolicy    *sepolicy,
+                                       struct archive_entry *entry,
+                                       OstreeMutableTree *root,
+                                       const char        *default_dir_checksum,
+                                       GCancellable      *cancellable,
+                                       GError           **error)
+{
+  gboolean ret = FALSE;
+  const char *pathname;
+  g_autoptr(GPtrArray) pathname_parts = NULL;
+  glnx_unref_object OstreeMutableTree *parent = NULL;
+  const char *basename;
+  const char *hardlink;
+  const struct stat *st;
+
+  pathname = path_relative (archive_entry_pathname (entry)); 
+  st = archive_entry_stat (entry);
+
+  if (!rpmostree_split_path_ptrarray_validate (pathname, &pathname_parts, error))
+    goto out;
+
+  if (pathname_parts->len == 0)
+    {
+      parent = NULL;
+      basename = NULL;
+    }
+  else
+    {
+      if (default_dir_checksum)
+        {
+          if (!ostree_mutable_tree_ensure_parent_dirs (root, pathname_parts,
+                                                       default_dir_checksum,
+                                                       &parent,
+                                                       error))
+            goto out;
+        }
+      else
+        {
+          if (!ostree_mutable_tree_walk (root, pathname_parts, 0, &parent, error))
+            goto out;
+        }
+      basename = (const char*)pathname_parts->pdata[pathname_parts->len-1];
+    }
+
+  hardlink = archive_entry_hardlink (entry);
+  if (hardlink)
+    {
+      const char *hardlink_basename;
+      g_autoptr(GPtrArray) hardlink_split_path = NULL;
+      glnx_unref_object OstreeMutableTree *hardlink_source_parent = NULL;
+      glnx_unref_object OstreeMutableTree *hardlink_source_subdir = NULL;
+      g_autofree char *hardlink_source_checksum = NULL;
+      
+      g_assert (parent != NULL);
+
+      if (!rpmostree_split_path_ptrarray_validate (hardlink, &hardlink_split_path, error))
+        goto out;
+      if (hardlink_split_path->len == 0)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Invalid hardlink path %s", hardlink);
+          goto out;
+        }
+      
+      hardlink_basename = hardlink_split_path->pdata[hardlink_split_path->len - 1];
+      
+      if (!ostree_mutable_tree_walk (root, hardlink_split_path, 0, &hardlink_source_parent, error))
+        goto out;
+      
+      if (!ostree_mutable_tree_lookup (hardlink_source_parent, hardlink_basename,
+                                       &hardlink_source_checksum,
+                                       &hardlink_source_subdir,
+                                       error))
+        {
+          g_prefix_error (error, "While resolving hardlink target: ");
+          goto out;
+        }
+      
+      if (hardlink_source_subdir)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Hardlink %s refers to directory %s",
+                       pathname, hardlink);
+          goto out;
+        }
+      g_assert (hardlink_source_checksum);
+      
+      if (!ostree_mutable_tree_replace_file (parent,
+                                             basename,
+                                             hardlink_source_checksum,
+                                             error))
+        goto out;
+    }
+  else
+    {
+      g_autofree char *object_checksum = NULL;
+      g_autoptr(GFileInfo) file_info = NULL;
+      glnx_unref_object OstreeMutableTree *subdir = NULL;
+
+      file_info = _rpmostree_libarchive_to_file_info (entry);
+
+      if (S_ISDIR (st->st_mode))
+        {
+          if (!write_directory_meta (self->ostree_cache, file_info, NULL, &object_checksum,
+                                     cancellable, error))
+            goto out;
+
+          if (parent == NULL)
+            {
+              subdir = g_object_ref (root);
+            }
+          else
+            {
+              if (!ostree_mutable_tree_ensure_dir (parent, basename, &subdir, error))
+                goto out;
+            }
+
+          ostree_mutable_tree_set_metadata_checksum (subdir, object_checksum);
+        }
+      else if (S_ISREG (st->st_mode) || S_ISLNK (st->st_mode))
+        {
+          g_autofree guchar *object_csum = NULL;
+
+          if (parent == NULL)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Can't import file as root directory");
+              goto out;
+            }
+
+          if (!_rpmostree_import_libarchive_entry_file (repo, self->archive, entry, file_info,
+                                                        &object_csum,
+                                                        cancellable, error))
+            goto out;
+          
+          object_checksum = ostree_checksum_from_bytes (object_csum);
+          if (!ostree_mutable_tree_replace_file (parent, basename,
+                                                 object_checksum,
+                                                 error))
+            goto out;
+        }
+      else
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Unsupported file type for path '%s'", pathname);
+          goto out;
+        }
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+gboolean
+rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
+                                     OstreeRepo        *repo,
+                                     OstreeSePolicy    *sepolicy,
+                                     char             **out_commit,
+                                     GCancellable      *cancellable,
+                                     GError           **error)
+{
+  gboolean ret = FALSE;
+  g_autoptr(GHashTable) rpmfi_overrides = NULL;
+  g_autoptr(GHashTable) hardlinks =
+    g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  g_autofree char *default_dir_checksum  = NULL;
+  glnx_unref_object OstreeMutableTree *mtree = NULL;
+
+  rpmfi_overrides = build_rpmfi_overrides (self);
+
+  /* Default directories are 0/0/0755, and right now we're ignoring
+   * SELinux.  (This might be a problem for /etc, but in practice
+   * anything with nontrivial perms should be in the packages)
+   */
+  { glnx_unref_object GFileInfo *default_dir_perms  = g_file_info_new ();
+    g_file_info_set_attribute_uint32 (default_dir_perms, "unix::uid", 0);
+    g_file_info_set_attribute_uint32 (default_dir_perms, "unix::gid", 0);
+    g_file_info_set_attribute_uint32 (default_dir_perms, "unix::mode", 0755 | S_IFDIR);
+    
+    if (!write_directory_meta (self->ostree_cache, default_dir_perms, NULL,
+                               &default_dir_checksum, cancellable, error))
+      goto out;
+  }
+
+  mtree = ostree_mutable_tree_new ();
+
+  while (TRUE)
+    {
+      struct archive_entry *entry;
+      
+      if (!next_archive_entry (self->archive, &entry, error))
+        goto out;
+      if (entry == NULL)
+        break;
+
+      if (!import_one_libarchive_entry_to_ostree (self, repo, sepolicy, entry, mtree,
+                                                  default_dir_checksum,
+                                                  cancellable, error))
+        goto out;
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
