@@ -80,10 +80,9 @@ rpmostree_unpacker_finalize (GObject *object)
     archive_read_free (self->archive); 
   if (self->fi)
     (void) rpmfiFree (self->fi);
-  if (self->owns_fd)
+  if (self->owns_fd && self->fd != -1)
     (void) close (self->fd);
-  g_clear_object (&self->ostree_cache);
-  g_free (&self->ostree_branch);
+  g_free (self->ostree_branch);
   
   G_OBJECT_CLASS (rpmostree_unpacker_parent_class)->finalize (object);
 }
@@ -237,6 +236,7 @@ rpmostree_unpacker_new_fd (int fd, RpmOstreeUnpackerFlags flags, GError **error)
   ret->fi = g_steal_pointer (&fi);
   ret->archive = g_steal_pointer (&archive);
   ret->flags = flags;
+  ret->hdr = g_steal_pointer (&hdr);
 
  out:
   if (archive)
@@ -691,7 +691,7 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
 
       if (S_ISDIR (st->st_mode))
         {
-          if (!write_directory_meta (self->ostree_cache, file_info, NULL, &object_checksum,
+          if (!write_directory_meta (repo, file_info, NULL, &object_checksum,
                                      cancellable, error))
             goto out;
 
@@ -755,8 +755,11 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   g_autoptr(GHashTable) hardlinks =
     g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
   g_autofree char *default_dir_checksum  = NULL;
+  g_autoptr(GFile) root = NULL;
   glnx_unref_object OstreeMutableTree *mtree = NULL;
+  g_autofree char *commit_checksum = NULL;
 
+  (void) rpmostree_unpacker_get_ostree_branch (self);
   rpmfi_overrides = build_rpmfi_overrides (self);
 
   /* Default directories are 0/0/0755, and right now we're ignoring
@@ -768,10 +771,13 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
     g_file_info_set_attribute_uint32 (default_dir_perms, "unix::gid", 0);
     g_file_info_set_attribute_uint32 (default_dir_perms, "unix::mode", 0755 | S_IFDIR);
     
-    if (!write_directory_meta (self->ostree_cache, default_dir_perms, NULL,
+    if (!write_directory_meta (repo, default_dir_perms, NULL,
                                &default_dir_checksum, cancellable, error))
       goto out;
   }
+
+  if (!ostree_repo_prepare_transaction (repo, NULL, cancellable, error))
+    goto out;
 
   mtree = ostree_mutable_tree_new ();
 
@@ -784,14 +790,32 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
       if (entry == NULL)
         break;
 
-      if (!import_one_libarchive_entry_to_ostree (self, repo, sepolicy, entry, mtree,
+      if (!import_one_libarchive_entry_to_ostree (self, repo,
+                                                  sepolicy, entry, mtree,
                                                   default_dir_checksum,
                                                   cancellable, error))
         goto out;
     }
 
+  if (!ostree_repo_write_mtree (repo, mtree, &root, cancellable, error))
+    goto out;
+
+  if (!ostree_repo_write_commit (repo, NULL, "", "", NULL,
+                                 OSTREE_REPO_FILE (root),
+                                 &commit_checksum, cancellable, error))
+    goto out;
+
+  ostree_repo_transaction_set_ref (repo, NULL,
+                                   rpmostree_unpacker_get_ostree_branch (self),
+                                   commit_checksum);
+
+  if (!ostree_repo_commit_transaction (repo, NULL, cancellable, error))
+    goto out;
+
   ret = TRUE;
+  *out_commit = g_steal_pointer (&commit_checksum);
  out:
+  ostree_repo_abort_transaction (repo, cancellable, NULL);
   return ret;
 }
 
