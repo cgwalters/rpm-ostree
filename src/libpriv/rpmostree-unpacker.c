@@ -294,9 +294,8 @@ build_rpmfi_overrides (RpmOstreeUnpacker *self)
    *
    * Otherwise we can just use the CPIO data.
    */
-  rpmfi_overrides = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
-                                           (GDestroyNotify) rpmfiFree);
-  for (i = 0; rpmfiNext (self->fi) > 0; i++)
+  rpmfi_overrides = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  for (i = 0; rpmfiNext (self->fi) >= 0; i++)
     {
       const char *user = rpmfiFUser (self->fi);
       const char *group = rpmfiFGroup (self->fi);
@@ -306,10 +305,9 @@ build_rpmfi_overrides (RpmOstreeUnpacker *self)
           && !(fcaps && fcaps[0]))
         continue;
 
-      { rpmfi ficopy = rpmfiInit(self->fi, i);
-            
-        g_hash_table_insert (rpmfi_overrides, g_strdup (path_relative (rpmfiFN (self->fi))), ficopy);
-      }
+      g_hash_table_insert (rpmfi_overrides,
+                           g_strdup (path_relative (rpmfiFN (self->fi))),
+                           GINT_TO_POINTER (i));
     }
       
   return g_steal_pointer (&rpmfi_overrides);
@@ -393,7 +391,14 @@ rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
             goto out;
         }
 
-      fi = g_hash_table_lookup (rpmfi_overrides, fn);
+      { gpointer v;
+        if (g_hash_table_lookup_extended (rpmfi_overrides, fn, NULL, &v))
+          {
+            int override_fi_idx = GPOINTER_TO_INT (v);
+            fi = self->fi;
+            rpmfiInit (self->fi, override_fi_idx);
+          }
+      }
       fmode = archive_st->st_mode;
 
       if (S_ISDIR (fmode))
@@ -468,7 +473,7 @@ rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *self,
           goto out;
         }
 
-      if (fi && (self->flags & RPMOSTREE_UNPACKER_FLAGS_OWNER) > 0)
+      if (fi != NULL && (self->flags & RPMOSTREE_UNPACKER_FLAGS_OWNER) > 0)
         {
           struct passwd *pwent;
           struct group *grent;
@@ -585,8 +590,55 @@ write_directory_meta (OstreeRepo   *repo,
   return ret;
 }
 
+struct _cap_struct {
+    struct __user_cap_header_struct head;
+    union {
+	struct __user_cap_data_struct set;
+	__u32 flat[3];
+    } u[_LINUX_CAPABILITY_U32S_2];
+};
+/* Rewritten version of _fcaps_save from libcap, since it's not
+ * exposed, and we need to generate the raw value.
+ */
+static void
+cap_t_to_vfs (cap_t cap_d, struct vfs_cap_data *rawvfscap, int *out_size)
+{
+  guint32 eff_not_zero, magic;
+  guint tocopy, i;
+  
+  /* Hardcoded to 2.  There is apparently a version 3 but it just maps
+   * to 2.  I doubt another version would ever be implemented, and
+   * even if it was we'd need to be backcompatible forever.  Anyways,
+   * setuid/fcaps binaries should go away entirely.
+   */
+  magic = VFS_CAP_REVISION_2;
+  tocopy = VFS_CAP_U32_2;
+  *out_size = XATTR_CAPS_SZ_2;
+
+  for (eff_not_zero = 0, i = 0; i < tocopy; i++)
+    eff_not_zero |= cap_d->u[i].flat[CAP_EFFECTIVE];
+
+  /* Here we're also not validating that the kernel understands
+   * the capabilities.
+   */
+
+  for (i = 0; i < tocopy; i++)
+    {
+      rawvfscap->data[i].permitted
+        = GUINT32_TO_LE(cap_d->u[i].flat[CAP_PERMITTED]);
+      rawvfscap->data[i].inheritable
+        = GUINT32_TO_LE(cap_d->u[i].flat[CAP_INHERITABLE]);
+    }
+
+  if (eff_not_zero == 0)
+    rawvfscap->magic_etc = GUINT32_TO_LE(magic);
+  else
+    rawvfscap->magic_etc = GUINT32_TO_LE(magic|VFS_CAP_FLAGS_EFFECTIVE);
+}
+
 static gboolean
 import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
+                                       GHashTable        *rpmfi_overrides,
                                        OstreeRepo        *repo,
                                        OstreeSePolicy    *sepolicy,
                                        struct archive_entry *entry,
@@ -602,9 +654,42 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
   const char *basename;
   const char *hardlink;
   const struct stat *st;
+  g_auto(GVariantBuilder) xattr_builder;
+  rpmfi fi = NULL;
 
+  g_variant_builder_init (&xattr_builder, (GVariantType*)"a(ayay)");
+  
   pathname = path_relative (archive_entry_pathname (entry)); 
   st = archive_entry_stat (entry);
+  { gpointer v;
+    if (g_hash_table_lookup_extended (rpmfi_overrides, pathname, NULL, &v))
+      {
+        int override_fi_idx = GPOINTER_TO_INT (v);
+        fi = self->fi;
+        rpmfiInit (self->fi, override_fi_idx);
+      }
+  }
+
+  if (fi != NULL)
+    {
+      const char *fcaps = rpmfiFCaps (fi);
+      if (fcaps != NULL && fcaps[0])
+        {
+          cap_t caps = cap_from_text (fcaps);
+          struct vfs_cap_data vfscap = { 0, };
+          int vfscap_size;
+          g_autoptr(GBytes) vfsbytes = NULL;
+
+          cap_t_to_vfs (caps, &vfscap, &vfscap_size);
+          vfsbytes = g_bytes_new (&vfscap, vfscap_size);
+      
+          g_variant_builder_add (&xattr_builder, "(@ay@ay)",
+                                 g_variant_new_bytestring ("security.capability"),
+                                 g_variant_new_from_bytes ((GVariantType*)"ay",
+                                                           vfsbytes,
+                                                           FALSE)); 
+        }
+    }
 
   if (!rpmostree_split_path_ptrarray_validate (pathname, &pathname_parts, error))
     goto out;
@@ -719,6 +804,7 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
             }
 
           if (!_rpmostree_import_libarchive_entry_file (repo, self->archive, entry, file_info,
+                                                        g_variant_builder_end (&xattr_builder),
                                                         &object_csum,
                                                         cancellable, error))
             goto out;
@@ -759,8 +845,9 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   glnx_unref_object OstreeMutableTree *mtree = NULL;
   g_autofree char *commit_checksum = NULL;
 
-  (void) rpmostree_unpacker_get_ostree_branch (self);
   rpmfi_overrides = build_rpmfi_overrides (self);
+
+  g_assert (sepolicy == NULL);
 
   /* Default directories are 0/0/0755, and right now we're ignoring
    * SELinux.  (This might be a problem for /etc, but in practice
@@ -790,7 +877,7 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
       if (entry == NULL)
         break;
 
-      if (!import_one_libarchive_entry_to_ostree (self, repo,
+      if (!import_one_libarchive_entry_to_ostree (self, rpmfi_overrides, repo,
                                                   sepolicy, entry, mtree,
                                                   default_dir_checksum,
                                                   cancellable, error))

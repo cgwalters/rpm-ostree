@@ -140,6 +140,7 @@ _rpmostree_import_libarchive_entry_file (OstreeRepo           *repo,
                                          struct archive       *a,
                                          struct archive_entry *entry,
                                          GFileInfo            *file_info,
+                                         GVariant             *xattrs,
                                          guchar              **out_csum,
                                          GCancellable         *cancellable,
                                          GError              **error)
@@ -155,7 +156,7 @@ _rpmostree_import_libarchive_entry_file (OstreeRepo           *repo,
   if (g_file_info_get_file_type (file_info) == G_FILE_TYPE_REGULAR)
     archive_stream = _ostree_libarchive_input_stream_new (a);
   
-  if (!ostree_raw_file_to_content_stream (archive_stream, file_info, NULL,
+  if (!ostree_raw_file_to_content_stream (archive_stream, file_info, xattrs,
                                           &file_object_input, &length, cancellable, error))
     goto out;
   

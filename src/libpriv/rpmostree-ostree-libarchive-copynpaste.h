@@ -38,6 +38,7 @@ _rpmostree_import_libarchive_entry_file (OstreeRepo           *repo,
                                          struct archive       *a,
                                          struct archive_entry *entry,
                                          GFileInfo            *file_info,
+                                         GVariant             *xattrs,
                                          guchar              **out_csum,
                                          GCancellable         *cancellable,
                                          GError              **error);
