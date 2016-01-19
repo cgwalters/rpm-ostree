@@ -24,13 +24,37 @@
 #include <libhif.h>
 #include <libhif/hif-utils.h>
 
+#include "libglnx.h"
+
+struct RpmOstreeHifInstall {
+  /* Target state */
+  GPtrArray *packages_to_download;
+  guint64 n_bytes_to_fetch;
+
+  /* Current state */
+  guint n_packages_fetched;
+  guint64 n_bytes_fetched;
+};
+
+typedef struct RpmOstreeHifInstall RpmOstreeHifInstall;
+
+struct RpmOstreePackageDownloadMetrics {
+  guint64 bytes;
+};
+
+typedef struct RpmOstreePackageDownloadMetrics RpmOstreePackageDownloadMetrics;
+
 HifContext *_rpmostree_libhif_new_default (void);
+
+void _rpmostree_libhif_set_cache_dfd (HifContext *hifctx, int dfd);
 
 gboolean _rpmostree_libhif_setup (HifContext    *context,
                                   GCancellable  *cancellable,
                                   GError       **error);
 
 void _rpmostree_libhif_repos_disable_all (HifContext    *context);
+
+void _rpmostree_libhif_set_ostree_repo (HifContext *context);
 
 gboolean _rpmostree_libhif_repos_enable_by_name (HifContext    *context,
                                                  const char    *name,
@@ -40,10 +64,20 @@ gboolean _rpmostree_libhif_console_download_metadata (HifContext     *context,
                                                       GCancellable   *cancellable,
                                                       GError        **error);
 
-gboolean _rpmostree_libhif_console_depsolve (HifContext     *context,
-                                             GCancellable   *cancellable,
-                                             GError        **error);
+gboolean _rpmostree_libhif_console_prepare_install (HifContext     *context,
+                                                    struct RpmOstreeHifInstall *out_install,
+                                                    GCancellable   *cancellable,
+                                                    GError        **error);
   
 gboolean _rpmostree_libhif_console_download_content (HifContext     *context,
+                                                     int             target_dfd,
+                                                     struct RpmOstreeHifInstall *install,
                                                      GCancellable   *cancellable,
                                                      GError        **error);
+
+static inline void
+_rpmostree_hif_install_cleanup (struct RpmOstreeHifInstall *hifinst)
+{
+  g_clear_pointer (&hifinst->packages_to_download, g_ptr_array_unref);
+}
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(RpmOstreeHifInstall, _rpmostree_hif_install_cleanup)

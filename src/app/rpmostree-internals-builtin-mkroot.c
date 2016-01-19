@@ -57,15 +57,15 @@ static GOptionEntry option_entries[] = {
 };
 
 static char *
-hif_package_relpath (int rootfs_fd,
-                     HyPackage package)
+hif_package_relpath (HyPackage package)
 {
-  return g_strconcat (".meta/repocache/", hy_package_get_reponame (package),
+  return g_strconcat ("repomd/", hy_package_get_reponame (package),
                       "/packages/", glnx_basename (hy_package_get_location (package)), NULL);
 }
 
 static gboolean
 unpack_one_package (int           rootfs_fd,
+                    int           tmpdir_dfd,
                     HifContext   *hifctx,
                     HyPackage     pkg,
                     GCancellable *cancellable,
@@ -77,8 +77,8 @@ unpack_one_package (int           rootfs_fd,
   RpmOstreeUnpackerFlags flags = 0;
   glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
    
-  package_relpath = hif_package_relpath (rootfs_fd, pkg);
-  pkg_abspath = glnx_fdrel_abspath (rootfs_fd, package_relpath);
+  package_relpath = hif_package_relpath (pkg);
+  pkg_abspath = glnx_fdrel_abspath (tmpdir_dfd, package_relpath);
 
   /* suid implies owner too...anything else is dangerous, as we might write
    * a setuid binary for the caller.
@@ -88,7 +88,7 @@ unpack_one_package (int           rootfs_fd,
   if (opt_suid_fcaps)
     flags |= RPMOSTREE_UNPACKER_FLAGS_SUID_FSCAPS;
         
-  unpacker = rpmostree_unpacker_new_at (rootfs_fd, package_relpath, flags, error);
+  unpacker = rpmostree_unpacker_new_at (tmpdir_dfd, package_relpath, flags, error);
   if (!unpacker)
     goto out;
 
@@ -99,7 +99,7 @@ unpack_one_package (int           rootfs_fd,
       goto out;
     }
    
-  if (TEMP_FAILURE_RETRY (unlinkat (rootfs_fd, package_relpath, 0)) < 0)
+  if (TEMP_FAILURE_RETRY (unlinkat (tmpdir_dfd, package_relpath, 0)) < 0)
     {
       glnx_set_error_from_errno (error);
       g_prefix_error (error, "Deleting %s: ", package_relpath);
@@ -113,6 +113,7 @@ unpack_one_package (int           rootfs_fd,
 
 static gboolean
 unpack_packages_in_root (int          rootfs_fd,
+                         int          tmpdir_dfd,
                          HifContext  *hifctx,
                          GCancellable *cancellable,
                          GError      **error)
@@ -140,8 +141,8 @@ unpack_packages_in_root (int          rootfs_fd,
     for (i = 0; i < package_list->len; i++)
       {
         HyPackage pkg = package_list->pdata[i];
-        g_autofree char *package_relpath = hif_package_relpath (rootfs_fd, pkg);
-        g_autofree char *pkg_abspath = glnx_fdrel_abspath (rootfs_fd, package_relpath);
+        g_autofree char *package_relpath = hif_package_relpath (pkg);
+        g_autofree char *pkg_abspath = glnx_fdrel_abspath (tmpdir_dfd, package_relpath);
         glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
         const gboolean allow_untrusted = TRUE;
         const gboolean is_update = FALSE;
@@ -174,7 +175,7 @@ unpack_packages_in_root (int          rootfs_fd,
    * don't run.  Just forcibly unpack it first.
    */
 
-  if (!unpack_one_package (rootfs_fd, hifctx, filesystem_package,
+  if (!unpack_one_package (rootfs_fd, tmpdir_dfd, hifctx, filesystem_package,
                            cancellable, error))
     goto out;
 
@@ -190,7 +191,7 @@ unpack_packages_in_root (int          rootfs_fd,
       if (pkg == filesystem_package)
         continue;
 
-      if (!unpack_one_package (rootfs_fd, hifctx, pkg,
+      if (!unpack_one_package (rootfs_fd, tmpdir_dfd, hifctx, pkg,
                                cancellable, error))
         goto out;
     }
@@ -211,9 +212,12 @@ rpmostree_internals_builtin_mkroot (int             argc,
   int exit_status = EXIT_FAILURE;
   GOptionContext *context = g_option_context_new ("ROOT PKGNAME [PKGNAME...]");
   glnx_unref_object HifContext *hifctx = NULL;
+  g_auto(RpmOstreeHifInstall) hifinstall = {0,};
   const char *rootpath;
   const char *const*pkgnames;
   glnx_fd_close int rootfs_fd = -1;
+  g_autofree char *tmpdir_path = NULL;
+  glnx_fd_close int tmpdir_dfd = -1;
   
   if (!rpmostree_option_context_parse (context,
                                        option_entries,
@@ -238,21 +242,17 @@ rpmostree_internals_builtin_mkroot (int             argc,
 
   hifctx = _rpmostree_libhif_new_default ();
 
-  { g_autofree char *cachepath = NULL;
-    g_autofree char *solvpath = NULL;
-    g_autofree char *lockpath = NULL;
+  tmpdir_path = g_strdup ("/var/tmp/rpm-ostree.XXXXXX");
+  if (!glnx_mkdtempat (AT_FDCWD, tmpdir_path, 0700, error))
+    goto out;
+  if (!glnx_opendirat (AT_FDCWD, tmpdir_path, FALSE, &tmpdir_dfd, error))
+    goto out;
 
-    hif_context_set_install_root (hifctx, rootpath);
-    cachepath = glnx_fdrel_abspath (rootfs_fd, ".meta/repocache");
-    hif_context_set_cache_dir (hifctx, cachepath);
-    hif_context_set_cache_age (hifctx, G_MAXUINT);
-    solvpath = glnx_fdrel_abspath (rootfs_fd, ".meta/solv");
-    hif_context_set_solv_dir (hifctx, solvpath);
-    lockpath = glnx_fdrel_abspath (rootfs_fd, ".meta/lock");
-    hif_context_set_lock_dir (hifctx, lockpath);
+  _rpmostree_libhif_set_cache_dfd (hifctx, tmpdir_dfd);
+  hif_context_set_install_root (hifctx, rootpath);
+  if (opt_yum_reposdir)
     hif_context_set_repo_dir (hifctx, opt_yum_reposdir);
-  }
-
+    
   if (!_rpmostree_libhif_setup (hifctx, cancellable, error))
     goto out;
   _rpmostree_libhif_repos_disable_all (hifctx);
@@ -280,16 +280,17 @@ rpmostree_internals_builtin_mkroot (int             argc,
   }
 
   /* --- Resolving dependencies --- */
-  if (!_rpmostree_libhif_console_depsolve (hifctx, cancellable, error))
+  if (!_rpmostree_libhif_console_prepare_install (hifctx, &hifinstall, cancellable, error))
     goto out;
 
   rpmostree_print_transaction (hifctx);
 
   /* --- Downloading packages --- */
-  if (!_rpmostree_libhif_console_download_content (hifctx, cancellable, error))
+  if (!_rpmostree_libhif_console_download_content (hifctx, -1, &hifinstall,
+                                                   cancellable, error))
     goto out;
 
-  if (!unpack_packages_in_root (rootfs_fd, hifctx, cancellable, error))
+  if (!unpack_packages_in_root (rootfs_fd, tmpdir_dfd, hifctx, cancellable, error))
     goto out;
 
   exit_status = EXIT_SUCCESS;

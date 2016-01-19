@@ -58,7 +58,6 @@ struct RpmOstreeUnpacker
   GHashTable *fscaps;
   RpmOstreeUnpackerFlags flags;
 
-  OstreeRepo *ostree_cache;
   char *ostree_branch;
 };
 
@@ -828,6 +827,27 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
   return ret;
 }
 
+static GBytes *
+rpm_header_to_export_bytes (Header h)
+{
+  guint hsize;
+  void *p = headerExport (h, &hsize);
+  headerLink (h);
+  return g_bytes_new_with_free_func (p, hsize, (GDestroyNotify)headerFree, h);
+}
+
+static GFileInfo *
+default_regfile_info (guint64 size)
+{
+  glnx_unref_object GFileInfo *default_file_perms  = g_file_info_new ();
+  g_file_info_set_attribute_uint32 (default_file_perms, "unix::uid", 0);
+  g_file_info_set_attribute_uint32 (default_file_perms, "unix::gid", 0);
+  g_file_info_set_attribute_uint32 (default_file_perms, "unix::mode", 0755 | S_IFREG);
+  g_file_info_set_file_type (default_file_perms, G_FILE_TYPE_REGULAR);
+  g_file_info_set_size (default_file_perms, size);
+  return g_steal_pointer (&default_file_perms);
+}
+
 gboolean
 rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
                                      OstreeRepo        *repo,
@@ -843,6 +863,7 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   g_autofree char *default_dir_checksum  = NULL;
   g_autoptr(GFile) root = NULL;
   glnx_unref_object OstreeMutableTree *mtree = NULL;
+  glnx_unref_object OstreeMutableTree *content_root = NULL;
   g_autofree char *commit_checksum = NULL;
 
   rpmfi_overrides = build_rpmfi_overrides (self);
@@ -867,6 +888,37 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
     goto out;
 
   mtree = ostree_mutable_tree_new ();
+  ostree_mutable_tree_set_metadata_checksum (mtree, default_dir_checksum);
+
+  { g_autoptr(GBytes) header_bytes = rpm_header_to_export_bytes (self->hdr);
+    g_autoptr(GInputStream) memin = g_memory_input_stream_new_from_bytes (header_bytes);
+    g_autoptr(GFileInfo) header_perms = default_regfile_info (g_bytes_get_size (header_bytes));
+    g_autoptr(GInputStream) object_in = NULL;
+    guint64 object_len;
+    g_autofree guint8 *header_csum = NULL;
+    char checksum[65];
+
+    if (!ostree_raw_file_to_content_stream (memin, header_perms, NULL, &object_in,
+                                            &object_len, cancellable, error))
+      goto out;
+
+    if (!ostree_repo_write_content (repo, NULL, object_in, object_len,
+                                    &header_csum,
+                                    cancellable, error))
+      goto out;
+
+    ostree_checksum_inplace_from_bytes (header_csum, checksum);
+
+    if (!ostree_mutable_tree_replace_file (mtree, "header", checksum, error))
+      goto out;
+  }
+                                                                          
+  if (!ostree_mutable_tree_ensure_dir (mtree,
+                                       "content",
+                                       &content_root,
+                                       error))
+    goto out;
+
 
   while (TRUE)
     {
@@ -878,7 +930,7 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
         break;
 
       if (!import_one_libarchive_entry_to_ostree (self, rpmfi_overrides, repo,
-                                                  sepolicy, entry, mtree,
+                                                  sepolicy, entry, content_root,
                                                   default_dir_checksum,
                                                   cancellable, error))
         goto out;

@@ -180,6 +180,7 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
   guint progress_sigid;
   char **strviter;
   GFile *contextdir = self->treefile_context_dirs->pdata[0];
+  g_auto(RpmOstreeHifInstall) hifinstall = { 0, };
   gs_unref_object HifContext *hifctx = NULL;
   gs_free char *cachedir = g_build_filename (gs_file_get_path_cached (self->workdir),
                                              "cache",
@@ -283,10 +284,10 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
         goto out;
     }
 
-  /* --- Resolving dependencies --- */
-  if (!_rpmostree_libhif_console_depsolve (hifctx, cancellable, error))
+  if (!_rpmostree_libhif_console_prepare_install (hifctx, &hifinstall, cancellable, error))
     goto out;
 
+  /* FIXME - just do a depsolve here before we compute download requirements */
   if (!compute_checksum_from_treefile_and_goal (self, hif_context_get_goal (hifctx),
                                                 &ret_new_inputhash, error))
     goto out;
@@ -319,9 +320,16 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
 
   rpmostree_print_transaction (hifctx);
 
-  /* --- Downloading packages --- */
-  if (!_rpmostree_libhif_console_download_content (hifctx, cancellable, error))
-    goto out;
+  { glnx_fd_close int cachedir_dfd = -1;
+    
+    if (!glnx_opendirat (self->workdir_dfd, "cache",
+                         TRUE, &cachedir_dfd, error))
+      goto out;
+
+    /* --- Downloading packages --- */
+    if (!_rpmostree_libhif_console_download_content (hifctx, cachedir_dfd, &hifinstall, cancellable, error))
+      goto out;
+  }
   
   { g_auto(GLnxConsoleRef) console = { 0, };
     gs_unref_object HifState *hifstate = hif_state_new ();
