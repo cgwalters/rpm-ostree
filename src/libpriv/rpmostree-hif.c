@@ -27,6 +27,10 @@
 #include "rpmostree-hif.h"
 #include "rpmostree-cleanup.h"
 
+#define RPMOSTREE_DIR_CACHE_REPOMD "repomd"
+#define RPMOSTREE_DIR_CACHE_SOLV "repomd"
+#define RPMOSTREE_DIR_LOCK "lock"
+
 HifContext *
 _rpmostree_libhif_new_default (void)
 {
@@ -42,9 +46,9 @@ _rpmostree_libhif_new_default (void)
 
   hif_context_set_repo_dir (hifctx, "/etc/yum.repos.d");
   hif_context_set_cache_age (hifctx, G_MAXUINT);
-  hif_context_set_cache_dir (hifctx, "/var/cache/rpm-ostree/metadata");
-  hif_context_set_solv_dir (hifctx, "/var/cache/rpm-ostree/solv");
-  hif_context_set_lock_dir (hifctx, "/run/rpm-ostree/lock");
+  hif_context_set_cache_dir (hifctx, "/var/cache/rpm-ostree/" RPMOSTREE_DIR_CACHE_REPOMD);
+  hif_context_set_solv_dir (hifctx, "/var/cache/rpm-ostree/" RPMOSTREE_DIR_CACHE_SOLV);
+  hif_context_set_lock_dir (hifctx, "/run/rpm-ostree/" RPMOSTREE_DIR_LOCK);
 
   hif_context_set_check_disk_space (hifctx, FALSE);
   hif_context_set_check_transaction (hifctx, FALSE);
@@ -57,11 +61,11 @@ void
 _rpmostree_libhif_set_cache_dfd (HifContext *hifctx, int dfd)
 {
   g_autofree char *repomddir =
-    glnx_fdrel_abspath (dfd, "repomd");
+    glnx_fdrel_abspath (dfd, RPMOSTREE_DIR_CACHE_REPOMD);
   g_autofree char *solvdir =
-    glnx_fdrel_abspath (dfd, "solv");
+    glnx_fdrel_abspath (dfd, RPMOSTREE_DIR_CACHE_SOLV);
   g_autofree char *lockdir =
-    glnx_fdrel_abspath (dfd, "lock");
+    glnx_fdrel_abspath (dfd, RPMOSTREE_DIR_LOCK);
 
   hif_context_set_cache_dir (hifctx, repomddir);
   hif_context_set_solv_dir (hifctx, solvdir);
@@ -264,6 +268,7 @@ _rpmostree_libhif_console_prepare_install (HifContext     *hifctx,
 
 struct GlobalDownloadState {
   struct RpmOstreeHifInstall *install;
+  HifState *hifstate;
   gchar *last_mirror_url;
   gchar *last_mirror_failure_message;
 };
@@ -317,11 +322,14 @@ package_download_complete_cb (void *user_data,
                               const char *msg)
 {
   struct PkgDownloadState *dlstate = user_data;
+  gboolean r;
   switch (status)
     {
     case LR_TRANSFER_SUCCESSFUL:
     case LR_TRANSFER_ALREADYEXISTS:
       dlstate->gdlstate->install->n_packages_fetched++;
+      r = hif_state_done (dlstate->gdlstate->hifstate, NULL);
+      g_assert (r);
       return LR_CB_OK;
     case LR_TRANSFER_ERROR:
       return LR_CB_ERROR; 
@@ -351,6 +359,7 @@ source_download_packages (HifSource *source,
                           GPtrArray *packages,
                           RpmOstreeHifInstall *install,
                           int        target_dfd,
+                          HifState  *state,
                           GCancellable *cancellable,
                           GError **error)
 {
@@ -370,8 +379,10 @@ source_download_packages (HifSource *source,
   handle = hif_source_get_lrhandle (source);
 
   gdlstate.install = install;
+  gdlstate.hifstate = state;
 
   g_array_set_size (pkg_dlstates, packages->len);
+  hif_state_set_number_steps (state, packages->len);
 
   for (i = 0; i < packages->len; i++)
     {
@@ -381,7 +392,7 @@ source_download_packages (HifSource *source,
 
       if (target_dfd == -1)
         {
-          target_dir = g_build_filename (hif_source_get_location (source), "packages/", NULL);
+          target_dir = g_build_filename (hif_source_get_location (source), "/packages/", NULL);
           if (!glnx_shutil_mkdir_p_at (AT_FDCWD, target_dir, 0755, cancellable, error))
             goto out;
         }
@@ -453,6 +464,8 @@ _rpmostree_libhif_console_download_content (HifContext     *hifctx,
   gboolean ret = FALSE;
   gs_unref_object HifState *hifstate = hif_state_new ();
   g_autoptr(GHashTable) source_to_packages = g_hash_table_new_full (NULL, NULL, NULL, (GDestroyNotify)g_ptr_array_unref);
+  g_auto(GLnxConsoleRef) console = { 0, };
+  guint progress_sigid;
   GHashTableIter hiter;
   gpointer key, value;
   guint i;
@@ -474,16 +487,24 @@ _rpmostree_libhif_console_download_content (HifContext     *hifctx,
       g_ptr_array_add (source_packages, pkg);
     }
 
+  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                     G_CALLBACK (on_hifstate_percentage_changed), 
+                                     "Downloading packages:");
+
+  glnx_console_lock (&console);
+
   g_hash_table_iter_init (&hiter, source_to_packages);
   while (g_hash_table_iter_next (&hiter, &key, &value))
     {
       HifSource *src = key;
       GPtrArray *src_packages = value;
       
-      if (!source_download_packages (src, src_packages, install, target_dfd,
+      if (!source_download_packages (src, src_packages, install, target_dfd, hifstate,
                                      cancellable, error))
         goto out;
     }
+
+  g_signal_handler_disconnect (hifstate, progress_sigid);
 
   ret = TRUE;
  out:

@@ -743,8 +743,7 @@ rpmostree_compose_builtin_tree (int             argc,
     goto out;
   g_ptr_array_add (packages, NULL);
 
-  {
-    gs_unref_object JsonGenerator *generator = json_generator_new ();
+  { gs_unref_object JsonGenerator *generator = json_generator_new ();
     char *treefile_buf = NULL;
     gsize len;
 

@@ -111,19 +111,24 @@ unpack_one_package (int           rootfs_fd,
   return ret;
 }
 
+typedef void (*UnpackProgressCallback) (gpointer user_data, guint unpacked, guint total);
+
 static gboolean
 unpack_packages_in_root (int          rootfs_fd,
                          int          tmpdir_dfd,
                          HifContext  *hifctx,
+                         UnpackProgressCallback progress_callback,
+                         gpointer         user_data,
                          GCancellable *cancellable,
                          GError      **error)
 {
   gboolean ret = FALSE;
   rpmts ts = rpmtsCreate ();
-  guint i, nElements;
+  guint i, n_rpmts_elements;
   g_autoptr(GHashTable) nevra_to_pkg =
     g_hash_table_new_full (g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)hy_package_free);
   HyPackage filesystem_package = NULL;   /* It's special... */
+  guint n_unpacked = 0;
 
   /* Tell librpm about each one so it can tsort them.  What we really
    * want is to do this from the rpm-md metadata so that we can fully
@@ -175,12 +180,20 @@ unpack_packages_in_root (int          rootfs_fd,
    * don't run.  Just forcibly unpack it first.
    */
 
+  n_rpmts_elements = (guint)rpmtsNElements (ts);
+  n_unpacked = 0;
+  if (progress_callback)
+    progress_callback (user_data, n_unpacked, n_rpmts_elements);
+
   if (!unpack_one_package (rootfs_fd, tmpdir_dfd, hifctx, filesystem_package,
                            cancellable, error))
     goto out;
 
-  nElements = (guint)rpmtsNElements (ts);
-  for (i = 0; i < nElements; i++)
+  n_unpacked++;
+  if (progress_callback)
+    progress_callback (user_data, n_unpacked, n_rpmts_elements);
+
+  for (i = 0; i < n_rpmts_elements; i++)
     {
       rpmte te = rpmtsElement (ts, i);
       const char *nevra = rpmteNEVRA (te);
@@ -194,6 +207,9 @@ unpack_packages_in_root (int          rootfs_fd,
       if (!unpack_one_package (rootfs_fd, tmpdir_dfd, hifctx, pkg,
                                cancellable, error))
         goto out;
+      n_unpacked++;
+      if (progress_callback)
+        progress_callback (user_data, n_unpacked, n_rpmts_elements);
     }
 
   ret = TRUE;
@@ -201,6 +217,14 @@ unpack_packages_in_root (int          rootfs_fd,
   if (ts)
     rpmtsFree (ts);
   return ret;
+}
+
+static void
+install_progress_cb (gpointer user_data,
+                     guint n_unpacked,
+                     guint n_total)
+{
+  glnx_console_progress_text_percent ("Unpacking: ", ((double)n_unpacked)/n_total * 100);
 }
 
 int
@@ -213,6 +237,7 @@ rpmostree_internals_builtin_mkroot (int             argc,
   GOptionContext *context = g_option_context_new ("ROOT PKGNAME [PKGNAME...]");
   glnx_unref_object HifContext *hifctx = NULL;
   g_auto(RpmOstreeHifInstall) hifinstall = {0,};
+  g_auto(GLnxConsoleRef) console = {0,};
   const char *rootpath;
   const char *const*pkgnames;
   glnx_fd_close int rootfs_fd = -1;
@@ -284,13 +309,17 @@ rpmostree_internals_builtin_mkroot (int             argc,
     goto out;
 
   rpmostree_print_transaction (hifctx);
+  g_print ("Will download %u packages\n", hifinstall.packages_to_download->len);
 
   /* --- Downloading packages --- */
   if (!_rpmostree_libhif_console_download_content (hifctx, -1, &hifinstall,
                                                    cancellable, error))
     goto out;
 
-  if (!unpack_packages_in_root (rootfs_fd, tmpdir_dfd, hifctx, cancellable, error))
+  glnx_console_lock (&console);
+
+  if (!unpack_packages_in_root (rootfs_fd, tmpdir_dfd, hifctx, install_progress_cb, NULL,
+                                cancellable, error))
     goto out;
 
   exit_status = EXIT_SUCCESS;
