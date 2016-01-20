@@ -46,6 +46,8 @@ typedef struct RpmOstreePackageDownloadMetrics RpmOstreePackageDownloadMetrics;
 
 HifContext *_rpmostree_libhif_new_default (void);
 
+void _rpmostree_reset_rpm_sighandlers (void);
+
 void _rpmostree_libhif_set_cache_dfd (HifContext *hifctx, int dfd);
 
 gboolean _rpmostree_libhif_setup (HifContext    *context,

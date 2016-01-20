@@ -33,6 +33,7 @@
 #include <grp.h>
 #include <sys/capability.h>
 #include "rpmostree-unpacker.h"
+#include "rpmostree-hif.h"
 #include "rpmostree-ostree-libarchive-copynpaste.h"
 #include <rpm/rpmlib.h>
 #include <rpm/rpmlog.h>
@@ -170,6 +171,7 @@ rpm_parse_hdr_fi (int fd, rpmfi *out_fi, Header *out_header,
   int r;
 
   ts = rpmtsCreate ();
+  _rpmostree_reset_rpm_sighandlers ();
   rpmtsSetVSFlags (ts, _RPMVSF_NOSIGNATURES);
 
   /* librpm needs Fopenfd */
@@ -203,10 +205,12 @@ rpm_parse_hdr_fi (int fd, rpmfi *out_fi, Header *out_header,
   
   fi = rpmfiNew (ts, hdr, RPMTAG_BASENAMES, (RPMFI_NOHEADER | RPMFI_FLAGS_INSTALL));
   fi = rpmfiInit (fi, 0);
+
   *out_fi = g_steal_pointer (&fi);
   *out_header = g_steal_pointer (&hdr);
   ret = TRUE;
  out:
+  _rpmostree_reset_rpm_sighandlers ();
   if (fi != NULL)
     rpmfiFree (fi);
   if (hdr != NULL)

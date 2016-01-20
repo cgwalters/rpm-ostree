@@ -168,6 +168,7 @@ unpack_packages_in_root (int          rootfs_fd,
   }
 
   rpmtsOrder (ts);
+  _rpmostree_reset_rpm_sighandlers ();
 
   /* Okay so what's going on in Fedora with incestuous relationship
    * between the `filesystem`, `setup`, `libgcc` RPMs is actively

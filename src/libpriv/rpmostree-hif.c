@@ -31,17 +31,33 @@
 #define RPMOSTREE_DIR_CACHE_SOLV "repomd"
 #define RPMOSTREE_DIR_LOCK "lock"
 
+void
+_rpmostree_reset_rpm_sighandlers (void)
+{
+  /* Forcibly override rpm/librepo SIGINT handlers.  We always operate
+   * in a fully idempotent/atomic mode, and can be killed at any time.
+   */
+#ifndef BUILDOPT_HAVE_RPMSQ_SET_INTERRUPT_SAFETY
+  signal (SIGINT, SIG_DFL);
+  signal (SIGTERM, SIG_DFL);
+#endif
+}
+
 HifContext *
 _rpmostree_libhif_new_default (void)
 {
   HifContext *hifctx;
 
-  /* We can be control-c'd at any time */
+  /* We can always be control-c'd at any time; this is new API,
+   * otherwise we keep calling _rpmostree_reset_rpm_sighandlers() in
+   * various places.
+   */
 #if BUILDOPT_HAVE_RPMSQ_SET_INTERRUPT_SAFETY
   rpmsqSetInterruptSafety (FALSE);
 #endif
 
   hifctx = hif_context_new ();
+  _rpmostree_reset_rpm_sighandlers ();
   hif_context_set_http_proxy (hifctx, g_getenv ("http_proxy"));
 
   hif_context_set_repo_dir (hifctx, "/etc/yum.repos.d");
@@ -80,12 +96,6 @@ _rpmostree_libhif_setup (HifContext    *context,
   if (!hif_context_setup (context, cancellable, error))
     return FALSE;
 
-  /* Forcibly override rpm/librepo SIGINT handlers.  We always operate
-   * in a fully idempotent/atomic mode, and can be killed at any time.
-   */
-  signal (SIGINT, SIG_DFL);
-  signal (SIGTERM, SIG_DFL);
-  
   return TRUE;
 }
 
@@ -175,6 +185,7 @@ _rpmostree_libhif_console_download_metadata (HifContext     *hifctx,
 
   ret = TRUE;
  out:
+  _rpmostree_reset_rpm_sighandlers ();
   return ret;
 }
   
@@ -423,6 +434,8 @@ source_download_packages (HifSource *source,
 	
       package_targets = g_slist_prepend (package_targets, target);
     }
+
+  _rpmostree_reset_rpm_sighandlers ();
 
   if (!lr_download_packages (package_targets, LR_PACKAGEDOWNLOAD_FAILFAST, &error_local))
     {
