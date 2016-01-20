@@ -22,9 +22,17 @@
 
 #include <glib-unix.h>
 #include <rpm/rpmsq.h>
+#include <rpm/rpmlib.h>
+#include <rpm/rpmlog.h>
+#include <rpm/rpmfi.h>
+#include <rpm/rpmts.h>
 #include <gio/gunixoutputstream.h>
+#include <libhif.h>
+#include <libhif/hif-utils.h>
+#include <libhif/hif-package.h>
 
 #include "rpmostree-hif.h"
+#include "rpmostree-unpacker.h"
 #include "rpmostree-cleanup.h"
 
 #define RPMOSTREE_DIR_CACHE_REPOMD "repomd"
@@ -188,10 +196,58 @@ _rpmostree_libhif_console_download_metadata (HifContext     *hifctx,
   _rpmostree_reset_rpm_sighandlers ();
   return ret;
 }
-  
-static GPtrArray *
-get_packages_to_download (HifContext  *hifctx)
+
+static char *
+cache_branch_for_nevra (const char *nevra)
 {
+  GString *r = g_string_new ("rpmcache-");
+  const char *p;
+  for (p = nevra; *p; p++)
+    {
+      const char c = *p;
+      switch (c)
+        {
+        case '.':
+        case '-':
+          g_string_append_c (r, c);
+          continue;
+        }
+      if (g_ascii_isalnum (c))
+        {
+          g_string_append_c (r, c);
+          continue;
+        }
+      if (c == '_')
+        {
+          g_string_append (r, "__");
+          continue;
+        }
+
+      g_string_append_printf (r, "_%02X", c);
+    }
+  return g_string_free (r, FALSE);
+}
+
+char *
+_rpmostree_get_cache_branch_header (Header hdr)
+{
+  return cache_branch_for_nevra (headerGetAsString (hdr, RPMTAG_NEVRA));
+}
+  
+char *
+_rpmostree_get_cache_branch_pkg (HyPackage pkg)
+{
+  g_autofree char *hawkey_nevra = hy_package_get_nevra (pkg);
+  return cache_branch_for_nevra (hawkey_nevra);
+}
+  
+static gboolean
+get_packages_to_download (HifContext  *hifctx,
+                          OstreeRepo  *ostreerepo,
+                          GPtrArray  **out_packages,
+                          GError     **error)
+{
+  gboolean ret = FALSE;
   guint i;
   g_autoptr(GPtrArray) packages = NULL;
   g_autoptr(GPtrArray) packages_to_download = NULL;
@@ -209,7 +265,6 @@ get_packages_to_download (HifContext  *hifctx)
     {
       HyPackage pkg = packages->pdata[i];
       HifSource *src = NULL;
-      const char *cachepath;
       guint j;
 
       /* get correct package source */
@@ -234,27 +289,47 @@ get_packages_to_download (HifContext  *hifctx)
           g_strcmp0 (hy_package_get_reponame (pkg), HY_CMDLINE_REPO_NAME) == 0)
         continue;
 
-      cachepath = hif_package_get_filename (pkg);
+      if (ostreerepo)
+        {
+          g_autofree char *cachebranch = _rpmostree_get_cache_branch_pkg (pkg);
+          g_autofree char *cached_rev = NULL; 
 
-      /* Right now we're not re-checksumming cached RPMs, we assume
-       * they are valid.  This is a change from the current libhif
-       * behavior, but I think it's right.  We should record validity
-       * once, then ensure it's immutable after that.
-       */
-      if (g_file_test (cachepath, G_FILE_TEST_EXISTS))
-        continue;
+          if (!ostree_repo_resolve_rev (ostreerepo, cachebranch, TRUE, &cached_rev, error))
+            goto out;
+
+          if (cached_rev)
+            continue;
+        }
+      else
+        {
+          const char *cachepath;
+          
+          cachepath = hif_package_get_filename (pkg);
+
+          /* Right now we're not re-checksumming cached RPMs, we assume
+           * they are valid.  This is a change from the current libhif
+           * behavior, but I think it's right.  We should record validity
+           * once, then ensure it's immutable after that.
+           */
+          if (g_file_test (cachepath, G_FILE_TEST_EXISTS))
+            continue;
+        }
 
       g_ptr_array_add (packages_to_download, hy_package_link (pkg));
     }
 
-  return g_steal_pointer (&packages_to_download);
+  ret = TRUE;
+  *out_packages = g_steal_pointer (&packages_to_download);
+ out:
+  return ret;
 }
 
 gboolean
-_rpmostree_libhif_console_prepare_install (HifContext     *hifctx,
-                                           RpmOstreeHifInstall *out_install,
-                                           GCancellable   *cancellable,
-                                           GError       **error)
+_rpmostree_libhif_console_prepare_install (HifContext           *hifctx,
+                                           OstreeRepo           *ostreerepo,
+                                           RpmOstreeHifInstall  *out_install,
+                                           GCancellable         *cancellable,
+                                           GError              **error)
 {
   gboolean ret = FALSE;
 
@@ -268,9 +343,8 @@ _rpmostree_libhif_console_prepare_install (HifContext     *hifctx,
     }
   printf ("%s", "done\n");
 
-  { GPtrArray *packages_to_download = get_packages_to_download (hifctx);
-    out_install->packages_to_download = g_steal_pointer (&packages_to_download);
-  }
+  if (!get_packages_to_download (hifctx, ostreerepo, &out_install->packages_to_download, error))
+    goto out;
 
   ret = TRUE;
  out:
@@ -327,20 +401,26 @@ mirrorlist_failure_cb (void *user_data,
   return LR_CB_OK;
 }
 
+static inline void
+hif_state_assert_done (HifState *hifstate)
+{
+  gboolean r;
+  r = hif_state_done (hifstate, NULL);
+  g_assert (r);
+}
+
 static int
 package_download_complete_cb (void *user_data,
                               LrTransferStatus status,
                               const char *msg)
 {
   struct PkgDownloadState *dlstate = user_data;
-  gboolean r;
   switch (status)
     {
     case LR_TRANSFER_SUCCESSFUL:
     case LR_TRANSFER_ALREADYEXISTS:
       dlstate->gdlstate->install->n_packages_fetched++;
-      r = hif_state_done (dlstate->gdlstate->hifstate, NULL);
-      g_assert (r);
+      hif_state_assert_done (dlstate->gdlstate->hifstate);
       return LR_CB_OK;
     case LR_TRANSFER_ERROR:
       return LR_CB_ERROR; 
@@ -467,21 +547,13 @@ source_download_packages (HifSource *source,
   return ret;
 }
 
-gboolean
-_rpmostree_libhif_console_download_content (HifContext     *hifctx,
-                                            int             target_dfd,
-                                            RpmOstreeHifInstall *install,
-                                            GCancellable   *cancellable,
-                                            GError        **error)
+static GHashTable *
+gather_source_to_packages (HifContext *hifctx,
+                           RpmOstreeHifInstall *install)
 {
-  gboolean ret = FALSE;
-  gs_unref_object HifState *hifstate = hif_state_new ();
-  g_autoptr(GHashTable) source_to_packages = g_hash_table_new_full (NULL, NULL, NULL, (GDestroyNotify)g_ptr_array_unref);
-  g_auto(GLnxConsoleRef) console = { 0, };
-  guint progress_sigid;
-  GHashTableIter hiter;
-  gpointer key, value;
   guint i;
+  g_autoptr(GHashTable) source_to_packages =
+    g_hash_table_new_full (NULL, NULL, NULL, (GDestroyNotify)g_ptr_array_unref);
 
   for (i = 0; i < install->packages_to_download->len; i++)
     {
@@ -500,21 +572,146 @@ _rpmostree_libhif_console_download_content (HifContext     *hifctx,
       g_ptr_array_add (source_packages, pkg);
     }
 
+  return g_steal_pointer (&source_to_packages);
+}
+
+gboolean
+_rpmostree_libhif_console_download_rpms (HifContext     *hifctx,
+                                         int             target_dfd,
+                                         RpmOstreeHifInstall *install,
+                                         GCancellable   *cancellable,
+                                         GError        **error)
+{
+  gboolean ret = FALSE;
+  gs_unref_object HifState *hifstate = hif_state_new ();
+  g_auto(GLnxConsoleRef) console = { 0, };
+  guint progress_sigid;
+  GHashTableIter hiter;
+  gpointer key, value;
+
   progress_sigid = g_signal_connect (hifstate, "percentage-changed",
                                      G_CALLBACK (on_hifstate_percentage_changed), 
                                      "Downloading packages:");
 
   glnx_console_lock (&console);
 
-  g_hash_table_iter_init (&hiter, source_to_packages);
-  while (g_hash_table_iter_next (&hiter, &key, &value))
-    {
-      HifSource *src = key;
-      GPtrArray *src_packages = value;
+  { g_autoptr(GHashTable) source_to_packages = gather_source_to_packages (hifctx, install);
+
+    g_hash_table_iter_init (&hiter, source_to_packages);
+    while (g_hash_table_iter_next (&hiter, &key, &value))
+      {
+        HifSource *src = key;
+        GPtrArray *src_packages = value;
       
-      if (!source_download_packages (src, src_packages, install, target_dfd, hifstate,
-                                     cancellable, error))
+        if (!source_download_packages (src, src_packages, install, target_dfd, hifstate,
+                                       cancellable, error))
+          goto out;
+      }
+  }
+
+  g_signal_handler_disconnect (hifstate, progress_sigid);
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+unpack_one_package (OstreeRepo   *ostreerepo,
+                    int           tmpdir_dfd,
+                    HifContext   *hifctx,
+                    HyPackage     pkg,
+                    GCancellable *cancellable,
+                    GError      **error)
+{
+  gboolean ret = FALSE;
+  g_autofree char *ostree_commit = NULL;
+  glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
+  const char *pkg_relpath = glnx_basename (hy_package_get_location (pkg));
+   
+  /* TODO - tweak the unpacker flags for containers */
+  unpacker = rpmostree_unpacker_new_at (tmpdir_dfd, pkg_relpath,
+                                        RPMOSTREE_UNPACKER_FLAGS_ALL,
+                                        error);
+  if (!unpacker)
+    goto out;
+
+  if (!rpmostree_unpacker_unpack_to_ostree (unpacker, ostreerepo, NULL, &ostree_commit,
+                                            cancellable, error))
+    {
+      g_autofree char *nevra = hy_package_get_nevra (pkg);
+      g_prefix_error (error, "Unpacking %s: ", nevra);
+      goto out;
+    }
+   
+  if (TEMP_FAILURE_RETRY (unlinkat (tmpdir_dfd, pkg_relpath, 0)) < 0)
+    {
+      glnx_set_error_from_errno (error);
+      g_prefix_error (error, "Deleting %s: ", pkg_relpath);
+      goto out;
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+gboolean
+_rpmostree_libhif_console_download_import (HifContext           *hifctx,
+                                           OstreeRepo           *ostreerepo,
+                                           RpmOstreeHifInstall  *install,
+                                           GCancellable         *cancellable,
+                                           GError              **error)
+{
+  gboolean ret = FALSE;
+  gs_unref_object HifState *hifstate = hif_state_new ();
+  g_auto(GLnxConsoleRef) console = { 0, };
+  glnx_fd_close int pkg_tempdir_dfd = -1;
+  g_autofree char *pkg_tempdir = NULL;
+  guint progress_sigid;
+  GHashTableIter hiter;
+  gpointer key, value;
+  guint i;
+
+  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                     G_CALLBACK (on_hifstate_percentage_changed), 
+                                     "Downloading packages:");
+
+  glnx_console_lock (&console);
+
+  if (!rpmostree_mkdtemp ("/var/tmp/rpmostree-import-XXXXXX", &pkg_tempdir, &pkg_tempdir_dfd, error))
+    goto out;
+
+  { g_autoptr(GHashTable) source_to_packages = gather_source_to_packages (hifctx, install);
+    
+    g_hash_table_iter_init (&hiter, source_to_packages);
+    while (g_hash_table_iter_next (&hiter, &key, &value))
+      {
+        HifSource *src = key;
+        GPtrArray *src_packages = value;
+        
+        if (!source_download_packages (src, src_packages, install, pkg_tempdir_dfd, hifstate,
+                                       cancellable, error))
+          goto out;
+      }
+  }
+
+  (void) hif_state_reset (hifstate);
+  g_signal_handler_disconnect (hifstate, progress_sigid);
+
+  hif_state_set_number_steps (hifstate, install->packages_to_download->len);
+  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                     G_CALLBACK (on_hifstate_percentage_changed), 
+                                     "Importing packages:");
+
+
+  for (i = 0; i < install->packages_to_download->len; i++)
+    {
+      HyPackage pkg = install->packages_to_download->pdata[i];
+      if (!unpack_one_package (ostreerepo, pkg_tempdir_dfd, hifctx, pkg,
+                               cancellable, error))
         goto out;
+      hif_state_assert_done (hifstate);
     }
 
   g_signal_handler_disconnect (hifstate, progress_sigid);

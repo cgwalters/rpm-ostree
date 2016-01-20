@@ -48,7 +48,7 @@ static gboolean opt_owner = FALSE;
 static char **opt_enable_yum_repos = NULL;
 
 static GOptionEntry option_entries[] = {
-  { "ostree-repo", 0, 0, G_OPTION_ARG_NONE, &opt_ostree_repo, "OSTree repo to use as cache", NULL },
+  { "ostree-repo", 0, 0, G_OPTION_ARG_STRING, &opt_ostree_repo, "OSTree repo to use as cache at PATH", "PATH" },
   { "yum-reposdir", 0, 0, G_OPTION_ARG_STRING, &opt_yum_reposdir, "Path to yum repo configs (default: /etc/yum.repos.d)", NULL },
   { "enable-yum-repo", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_enable_yum_repos, "Enable yum repository", NULL },
   { "suid-fcaps", 0, 0, G_OPTION_ARG_NONE, &opt_suid_fcaps, "Enable setting suid/sgid and capabilities", NULL },
@@ -56,55 +56,22 @@ static GOptionEntry option_entries[] = {
   { NULL }
 };
 
-static char *
-hif_package_relpath (HyPackage package)
-{
-  return g_strconcat ("repomd/", hy_package_get_reponame (package),
-                      "/packages/", glnx_basename (hy_package_get_location (package)), NULL);
-}
-
 static gboolean
 unpack_one_package (int           rootfs_fd,
-                    int           tmpdir_dfd,
                     HifContext   *hifctx,
                     HyPackage     pkg,
+                    OstreeRepo   *ostreerepo,
+                    const char   *pkg_ostree_commit,
                     GCancellable *cancellable,
                     GError      **error)
 {
   gboolean ret = FALSE;
-  g_autofree char *package_relpath = NULL;
-  g_autofree char *pkg_abspath = NULL;
-  RpmOstreeUnpackerFlags flags = 0;
-  glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
-   
-  package_relpath = hif_package_relpath (pkg);
-  pkg_abspath = glnx_fdrel_abspath (tmpdir_dfd, package_relpath);
+  OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
+                                     OSTREE_REPO_CHECKOUT_OVERWRITE_NONE, };
 
-  /* suid implies owner too...anything else is dangerous, as we might write
-   * a setuid binary for the caller.
-   */
-  if (opt_owner || opt_suid_fcaps)
-    flags |= RPMOSTREE_UNPACKER_FLAGS_OWNER;
-  if (opt_suid_fcaps)
-    flags |= RPMOSTREE_UNPACKER_FLAGS_SUID_FSCAPS;
-        
-  unpacker = rpmostree_unpacker_new_at (tmpdir_dfd, package_relpath, flags, error);
-  if (!unpacker)
+  if (!ostree_repo_checkout_tree_at (ostreerepo, &opts, rootfs_fd, ".",
+                                     pkg_ostree_commit, cancellable, error))
     goto out;
-
-  if (!rpmostree_unpacker_unpack_to_dfd (unpacker, rootfs_fd, cancellable, error))
-    {
-      g_autofree char *nevra = hy_package_get_nevra (pkg);
-      g_prefix_error (error, "Unpacking %s: ", nevra);
-      goto out;
-    }
-   
-  if (TEMP_FAILURE_RETRY (unlinkat (tmpdir_dfd, package_relpath, 0)) < 0)
-    {
-      glnx_set_error_from_errno (error);
-      g_prefix_error (error, "Deleting %s: ", package_relpath);
-      goto out;
-    }
 
   ret = TRUE;
  out:
@@ -115,7 +82,7 @@ typedef void (*UnpackProgressCallback) (gpointer user_data, guint unpacked, guin
 
 static gboolean
 unpack_packages_in_root (int          rootfs_fd,
-                         int          tmpdir_dfd,
+                         OstreeRepo  *ostreerepo,
                          HifContext  *hifctx,
                          UnpackProgressCallback progress_callback,
                          gpointer         user_data,
@@ -127,6 +94,8 @@ unpack_packages_in_root (int          rootfs_fd,
   guint i, n_rpmts_elements;
   g_autoptr(GHashTable) nevra_to_pkg =
     g_hash_table_new_full (g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)hy_package_free);
+  g_autoptr(GHashTable) pkg_to_ostree_commit =
+    g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_free);
   HyPackage filesystem_package = NULL;   /* It's special... */
   guint n_unpacked = 0;
 
@@ -146,21 +115,49 @@ unpack_packages_in_root (int          rootfs_fd,
     for (i = 0; i < package_list->len; i++)
       {
         HyPackage pkg = package_list->pdata[i];
-        g_autofree char *package_relpath = hif_package_relpath (pkg);
-        g_autofree char *pkg_abspath = glnx_fdrel_abspath (tmpdir_dfd, package_relpath);
         glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
-        const gboolean allow_untrusted = TRUE;
-        const gboolean is_update = FALSE;
+        g_autofree char *cachebranch = _rpmostree_get_cache_branch_pkg (pkg);
+        g_autofree char *cached_rev = NULL; 
+        g_autoptr(GVariant) pkg_commit = NULL;
+        g_autoptr(GVariant) header_variant = NULL;
 
-        ret = hif_rpmts_add_install_filename (ts,
-                                              pkg_abspath,
-                                              allow_untrusted,
-                                              is_update,
-                                              error);
-        if (!ret)
+        if (!ostree_repo_resolve_rev (ostreerepo, cachebranch, FALSE, &cached_rev, error))
           goto out;
 
+        if (!ostree_repo_load_variant (ostreerepo, OSTREE_OBJECT_TYPE_COMMIT, cached_rev,
+                                       &pkg_commit, error))
+          goto out;
+
+        { g_autoptr(GVariant) pkg_meta = g_variant_get_child_value (pkg_commit, 0);
+          g_autoptr(GVariantDict) pkg_meta_dict = g_variant_dict_new (pkg_meta);
+
+          if (!g_variant_dict_lookup (pkg_meta_dict, "rpmostree.header", "@ay", &header_variant))
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Unable to find 'rpmostree.header' key in commit %s of %s",
+                           cached_rev, hif_package_get_id (pkg));
+              goto out;
+            }
+        }
+
+        { Header hdr = headerImport ((void*)g_variant_get_data (header_variant),
+                                     g_variant_get_size (header_variant),
+                                     HEADERIMPORT_COPY);
+          int r = rpmtsAddInstallElement (ts, hdr, hif_package_get_filename (pkg), TRUE, NULL);
+          headerFree (hdr);
+          if (r != 0)
+            {
+              g_set_error (error,
+                           G_IO_ERROR,
+                           G_IO_ERROR_FAILED,
+                           "Failed to add install element for %s",
+                           hif_package_get_filename (pkg));
+		goto out;
+            }
+        }
+          
         g_hash_table_insert (nevra_to_pkg, hy_package_get_nevra (pkg), hy_package_link (pkg));
+        g_hash_table_insert (pkg_to_ostree_commit, hy_package_link (pkg), g_steal_pointer (&pkg_commit));
 
         if (strcmp (hy_package_get_name (pkg), "filesystem") == 0)
           filesystem_package = hy_package_link (pkg);
@@ -186,7 +183,8 @@ unpack_packages_in_root (int          rootfs_fd,
   if (progress_callback)
     progress_callback (user_data, n_unpacked, n_rpmts_elements);
 
-  if (!unpack_one_package (rootfs_fd, tmpdir_dfd, hifctx, filesystem_package,
+  if (!unpack_one_package (rootfs_fd, hifctx, filesystem_package, ostreerepo,
+                           g_hash_table_lookup (pkg_to_ostree_commit, filesystem_package),
                            cancellable, error))
     goto out;
 
@@ -205,7 +203,8 @@ unpack_packages_in_root (int          rootfs_fd,
       if (pkg == filesystem_package)
         continue;
 
-      if (!unpack_one_package (rootfs_fd, tmpdir_dfd, hifctx, pkg,
+      if (!unpack_one_package (rootfs_fd, hifctx, pkg, ostreerepo,
+                               g_hash_table_lookup (pkg_to_ostree_commit, pkg),
                                cancellable, error))
         goto out;
       n_unpacked++;
@@ -238,12 +237,12 @@ rpmostree_internals_builtin_mkroot (int             argc,
   GOptionContext *context = g_option_context_new ("ROOT PKGNAME [PKGNAME...]");
   glnx_unref_object HifContext *hifctx = NULL;
   g_auto(RpmOstreeHifInstall) hifinstall = {0,};
-  g_auto(GLnxConsoleRef) console = {0,};
   const char *rootpath;
   const char *const*pkgnames;
   glnx_fd_close int rootfs_fd = -1;
   g_autofree char *tmpdir_path = NULL;
   glnx_fd_close int tmpdir_dfd = -1;
+  glnx_unref_object OstreeRepo *ostreerepo = NULL;
   
   if (!rpmostree_option_context_parse (context,
                                        option_entries,
@@ -265,6 +264,19 @@ rpmostree_internals_builtin_mkroot (int             argc,
 
   if (!glnx_opendirat (AT_FDCWD, argv[1], TRUE, &rootfs_fd, error))
     goto out;
+
+  if (opt_ostree_repo)
+    {
+      g_autoptr(GFile) repo_path = g_file_new_for_path (opt_ostree_repo);
+      ostreerepo = ostree_repo_new (repo_path);
+      if (!ostree_repo_open (ostreerepo, cancellable, error))
+        goto out;
+    }
+  else
+    {
+      rpmostree_usage_error (context, "--ostree-repo is required", error);
+      goto out;
+    }
 
   hifctx = _rpmostree_libhif_new_default ();
 
@@ -306,22 +318,24 @@ rpmostree_internals_builtin_mkroot (int             argc,
   }
 
   /* --- Resolving dependencies --- */
-  if (!_rpmostree_libhif_console_prepare_install (hifctx, &hifinstall, cancellable, error))
+  if (!_rpmostree_libhif_console_prepare_install (hifctx, ostreerepo, &hifinstall, cancellable, error))
     goto out;
 
   rpmostree_print_transaction (hifctx);
   g_print ("Will download %u packages\n", hifinstall.packages_to_download->len);
 
-  /* --- Downloading packages --- */
-  if (!_rpmostree_libhif_console_download_content (hifctx, -1, &hifinstall,
-                                                   cancellable, error))
+  /* --- Download and import as necessary --- */
+  if (!_rpmostree_libhif_console_download_import (hifctx, ostreerepo, &hifinstall,
+                                                  cancellable, error))
     goto out;
 
-  glnx_console_lock (&console);
-
-  if (!unpack_packages_in_root (rootfs_fd, tmpdir_dfd, hifctx, install_progress_cb, NULL,
-                                cancellable, error))
-    goto out;
+  { g_auto(GLnxConsoleRef) console = {0,};
+    glnx_console_lock (&console);
+    
+    if (!unpack_packages_in_root (rootfs_fd, ostreerepo, hifctx, install_progress_cb, NULL,
+                                  cancellable, error))
+      goto out;
+  }
 
   exit_status = EXIT_SUCCESS;
  out:

@@ -561,7 +561,7 @@ const char *
 rpmostree_unpacker_get_ostree_branch (RpmOstreeUnpacker *self)
 {
   if (!self->ostree_branch)
-    self->ostree_branch = g_strconcat ("rpmcache-", headerGetAsString(self->hdr, RPMTAG_NEVRA), NULL);
+    self->ostree_branch = _rpmostree_get_cache_branch_header (self->hdr);
 
   return self->ostree_branch;
 }
@@ -651,8 +651,8 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
                                        GError           **error)
 {
   gboolean ret = FALSE;
-  const char *pathname;
   g_autoptr(GPtrArray) pathname_parts = NULL;
+  const char *pathname;
   glnx_unref_object OstreeMutableTree *parent = NULL;
   const char *basename;
   const char *hardlink;
@@ -694,16 +694,16 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
         }
     }
 
-  if (!rpmostree_split_path_ptrarray_validate (pathname, &pathname_parts, error))
-    goto out;
-
-  if (pathname_parts->len == 0)
+  if (!pathname[0])
     {
       parent = NULL;
       basename = NULL;
     }
   else
     {
+      if (!rpmostree_split_path_ptrarray_validate (pathname, &pathname_parts, error))
+        goto out;
+
       if (default_dir_checksum)
         {
           if (!ostree_mutable_tree_ensure_parent_dirs (root, pathname_parts,
@@ -728,6 +728,8 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
       glnx_unref_object OstreeMutableTree *hardlink_source_parent = NULL;
       glnx_unref_object OstreeMutableTree *hardlink_source_subdir = NULL;
       g_autofree char *hardlink_source_checksum = NULL;
+
+      hardlink = path_relative (hardlink);
       
       g_assert (parent != NULL);
 
@@ -840,18 +842,6 @@ rpm_header_to_export_bytes (Header h)
   return g_bytes_new_with_free_func (p, hsize, (GDestroyNotify)headerFree, h);
 }
 
-static GFileInfo *
-default_regfile_info (guint64 size)
-{
-  glnx_unref_object GFileInfo *default_file_perms  = g_file_info_new ();
-  g_file_info_set_attribute_uint32 (default_file_perms, "unix::uid", 0);
-  g_file_info_set_attribute_uint32 (default_file_perms, "unix::gid", 0);
-  g_file_info_set_attribute_uint32 (default_file_perms, "unix::mode", 0755 | S_IFREG);
-  g_file_info_set_file_type (default_file_perms, G_FILE_TYPE_REGULAR);
-  g_file_info_set_size (default_file_perms, size);
-  return g_steal_pointer (&default_file_perms);
-}
-
 gboolean
 rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
                                      OstreeRepo        *repo,
@@ -868,7 +858,11 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   g_autoptr(GFile) root = NULL;
   glnx_unref_object OstreeMutableTree *mtree = NULL;
   glnx_unref_object OstreeMutableTree *content_root = NULL;
+  g_autoptr(GBytes) header_bytes = NULL;
   g_autofree char *commit_checksum = NULL;
+  g_auto(GVariantBuilder) metadata_builder;
+
+  g_variant_builder_init (&metadata_builder, (GVariantType*)"a{sv}");
 
   rpmfi_overrides = build_rpmfi_overrides (self);
 
@@ -894,36 +888,12 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   mtree = ostree_mutable_tree_new ();
   ostree_mutable_tree_set_metadata_checksum (mtree, default_dir_checksum);
 
+  /* Store the RPM Header in the commit metadata */
   { g_autoptr(GBytes) header_bytes = rpm_header_to_export_bytes (self->hdr);
-    g_autoptr(GInputStream) memin = g_memory_input_stream_new_from_bytes (header_bytes);
-    g_autoptr(GFileInfo) header_perms = default_regfile_info (g_bytes_get_size (header_bytes));
-    g_autoptr(GInputStream) object_in = NULL;
-    guint64 object_len;
-    g_autofree guint8 *header_csum = NULL;
-    char checksum[65];
-
-    if (!ostree_raw_file_to_content_stream (memin, header_perms, NULL, &object_in,
-                                            &object_len, cancellable, error))
-      goto out;
-
-    if (!ostree_repo_write_content (repo, NULL, object_in, object_len,
-                                    &header_csum,
-                                    cancellable, error))
-      goto out;
-
-    ostree_checksum_inplace_from_bytes (header_csum, checksum);
-
-    if (!ostree_mutable_tree_replace_file (mtree, "header", checksum, error))
-      goto out;
+    g_variant_builder_add (&metadata_builder, "{sv}", "rpmostree.header",
+                           g_variant_new_from_bytes ((GVariantType*)"ay", header_bytes, TRUE));
   }
                                                                           
-  if (!ostree_mutable_tree_ensure_dir (mtree,
-                                       "content",
-                                       &content_root,
-                                       error))
-    goto out;
-
-
   while (TRUE)
     {
       struct archive_entry *entry;
@@ -934,7 +904,7 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
         break;
 
       if (!import_one_libarchive_entry_to_ostree (self, rpmfi_overrides, repo,
-                                                  sepolicy, entry, content_root,
+                                                  sepolicy, entry, mtree,
                                                   default_dir_checksum,
                                                   cancellable, error))
         goto out;
@@ -943,7 +913,8 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   if (!ostree_repo_write_mtree (repo, mtree, &root, cancellable, error))
     goto out;
 
-  if (!ostree_repo_write_commit (repo, NULL, "", "", NULL,
+  if (!ostree_repo_write_commit (repo, NULL, "", "",
+                                 g_variant_builder_end (&metadata_builder),
                                  OSTREE_REPO_FILE (root),
                                  &commit_checksum, cancellable, error))
     goto out;

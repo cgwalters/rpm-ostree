@@ -23,6 +23,7 @@
 #include <gio/gio.h>
 #include <libhif.h>
 #include <libhif/hif-utils.h>
+#include <ostree.h>
 
 #include "libglnx.h"
 
@@ -58,6 +59,9 @@ void _rpmostree_libhif_repos_disable_all (HifContext    *context);
 
 void _rpmostree_libhif_set_ostree_repo (HifContext *context);
 
+char *_rpmostree_get_cache_branch_header (Header hdr);
+char *_rpmostree_get_cache_branch_pkg (HyPackage pkg);
+
 gboolean _rpmostree_libhif_repos_enable_by_name (HifContext    *context,
                                                  const char    *name,
                                                  GError       **error);
@@ -66,16 +70,24 @@ gboolean _rpmostree_libhif_console_download_metadata (HifContext     *context,
                                                       GCancellable   *cancellable,
                                                       GError        **error);
 
+/* This API allocates an install context, use with one of the later ones */
 gboolean _rpmostree_libhif_console_prepare_install (HifContext     *context,
+                                                    OstreeRepo     *repo,
                                                     struct RpmOstreeHifInstall *out_install,
                                                     GCancellable   *cancellable,
                                                     GError        **error);
-  
-gboolean _rpmostree_libhif_console_download_content (HifContext     *context,
-                                                     int             target_dfd,
-                                                     struct RpmOstreeHifInstall *install,
-                                                     GCancellable   *cancellable,
-                                                     GError        **error);
+
+gboolean _rpmostree_libhif_console_download_rpms (HifContext     *context,
+                                                  int             target_dfd,
+                                                  struct RpmOstreeHifInstall *install,
+                                                  GCancellable   *cancellable,
+                                                  GError        **error);
+
+gboolean _rpmostree_libhif_console_download_import (HifContext                 *context,
+                                                    OstreeRepo                 *repo,
+                                                    struct RpmOstreeHifInstall *install,
+                                                    GCancellable               *cancellable,
+                                                    GError                    **error);
 
 static inline void
 _rpmostree_hif_install_cleanup (struct RpmOstreeHifInstall *hifinst)

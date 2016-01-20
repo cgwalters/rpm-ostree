@@ -284,7 +284,7 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
         goto out;
     }
 
-  if (!_rpmostree_libhif_console_prepare_install (hifctx, &hifinstall, cancellable, error))
+  if (!_rpmostree_libhif_console_prepare_install (hifctx, NULL, &hifinstall, cancellable, error))
     goto out;
 
   /* FIXME - just do a depsolve here before we compute download requirements */
@@ -327,7 +327,7 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
       goto out;
 
     /* --- Downloading packages --- */
-    if (!_rpmostree_libhif_console_download_content (hifctx, cachedir_dfd, &hifinstall, cancellable, error))
+    if (!_rpmostree_libhif_console_download_rpms (hifctx, cachedir_dfd, &hifinstall, cancellable, error))
       goto out;
   }
   
