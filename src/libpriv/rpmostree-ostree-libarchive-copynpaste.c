@@ -121,15 +121,25 @@ GFileInfo *
 _rpmostree_libarchive_to_file_info (struct archive_entry *entry)
 {
   g_autoptr(GFileInfo) ret = NULL;
-  const struct stat *st;
+  struct stat st;
 
-  st = archive_entry_stat (entry);
+  st = *archive_entry_stat (entry);
 
-  ret = _ostree_header_gfile_info_new (st->st_mode, st->st_uid, st->st_gid);
+  if (S_ISDIR (st.st_mode))
+    {
+      /* Always ensure we can write and execute directories...since
+       * this content should ultimately be read-only entirely, we're
+       * just breaking things by dropping write permissions during
+       * builds.
+       */
+      st.st_mode |= 0700;
+    }
 
-  if (S_ISREG (st->st_mode))
-    g_file_info_set_attribute_uint64 (ret, "standard::size", st->st_size);
-  if (S_ISLNK (st->st_mode))
+  ret = _ostree_header_gfile_info_new (st.st_mode, st.st_uid, st.st_gid);
+
+  if (S_ISREG (st.st_mode))
+    g_file_info_set_attribute_uint64 (ret, "standard::size", st.st_size);
+  if (S_ISLNK (st.st_mode))
     g_file_info_set_attribute_byte_string (ret, "standard::symlink-target", archive_entry_symlink (entry));
 
   return g_steal_pointer (&ret);

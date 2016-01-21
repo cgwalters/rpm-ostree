@@ -42,6 +42,7 @@
 #include "libgsystem.h"
 
 static char *opt_ostree_repo;
+static char *opt_rpmmd_cachedir;
 static char *opt_yum_reposdir = "/etc/yum.repos.d";
 static gboolean opt_suid_fcaps = FALSE;
 static gboolean opt_owner = FALSE;
@@ -49,6 +50,7 @@ static char **opt_enable_yum_repos = NULL;
 
 static GOptionEntry option_entries[] = {
   { "ostree-repo", 0, 0, G_OPTION_ARG_STRING, &opt_ostree_repo, "OSTree repo to use as cache at PATH", "PATH" },
+  { "rpmmd-cachedir", 0, 0, G_OPTION_ARG_STRING, &opt_rpmmd_cachedir, "Path to rpm-md cache", NULL },
   { "yum-reposdir", 0, 0, G_OPTION_ARG_STRING, &opt_yum_reposdir, "Path to yum repo configs (default: /etc/yum.repos.d)", NULL },
   { "enable-yum-repo", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_enable_yum_repos, "Enable yum repository", NULL },
   { "suid-fcaps", 0, 0, G_OPTION_ARG_NONE, &opt_suid_fcaps, "Enable setting suid/sgid and capabilities", NULL },
@@ -67,14 +69,16 @@ unpack_one_package (int           rootfs_fd,
 {
   gboolean ret = FALSE;
   OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
-                                     OSTREE_REPO_CHECKOUT_OVERWRITE_NONE, };
+                                     OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
 
   if (!ostree_repo_checkout_tree_at (ostreerepo, &opts, rootfs_fd, ".",
                                      pkg_ostree_commit, cancellable, error))
     goto out;
-
+  
   ret = TRUE;
  out:
+  if (error && *error)
+    g_prefix_error (error, "Unpacking %s: ", hif_package_get_nevra (pkg));
   return ret;
 }
 
@@ -93,11 +97,15 @@ unpack_packages_in_root (int          rootfs_fd,
   rpmts ts = rpmtsCreate ();
   guint i, n_rpmts_elements;
   g_autoptr(GHashTable) nevra_to_pkg =
-    g_hash_table_new_full (g_str_hash, g_str_equal, (GDestroyNotify)g_free, (GDestroyNotify)hy_package_free);
+    g_hash_table_new_full (g_str_hash, g_str_equal, NULL, (GDestroyNotify)hy_package_free);
   g_autoptr(GHashTable) pkg_to_ostree_commit =
     g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_free);
   HyPackage filesystem_package = NULL;   /* It's special... */
   guint n_unpacked = 0;
+  int r;
+
+  r = rpmtsSetRootDir (ts, hif_context_get_install_root (hifctx));
+  g_assert (r >= 0);
 
   /* Tell librpm about each one so it can tsort them.  What we really
    * want is to do this from the rpm-md metadata so that we can fully
@@ -143,7 +151,7 @@ unpack_packages_in_root (int          rootfs_fd,
         { Header hdr = headerImport ((void*)g_variant_get_data (header_variant),
                                      g_variant_get_size (header_variant),
                                      HEADERIMPORT_COPY);
-          int r = rpmtsAddInstallElement (ts, hdr, hif_package_get_filename (pkg), TRUE, NULL);
+          int r = rpmtsAddInstallElement (ts, hdr, (char*)hif_package_get_nevra (pkg), TRUE, NULL);
           headerFree (hdr);
           if (r != 0)
             {
@@ -156,8 +164,8 @@ unpack_packages_in_root (int          rootfs_fd,
             }
         }
           
-        g_hash_table_insert (nevra_to_pkg, hy_package_get_nevra (pkg), hy_package_link (pkg));
-        g_hash_table_insert (pkg_to_ostree_commit, hy_package_link (pkg), g_steal_pointer (&pkg_commit));
+        g_hash_table_insert (nevra_to_pkg, (char*)hif_package_get_nevra (pkg), hy_package_link (pkg));
+        g_hash_table_insert (pkg_to_ostree_commit, hy_package_link (pkg), g_steal_pointer (&cached_rev));
 
         if (strcmp (hy_package_get_name (pkg), "filesystem") == 0)
           filesystem_package = hy_package_link (pkg);
@@ -186,7 +194,9 @@ unpack_packages_in_root (int          rootfs_fd,
   if (!unpack_one_package (rootfs_fd, hifctx, filesystem_package, ostreerepo,
                            g_hash_table_lookup (pkg_to_ostree_commit, filesystem_package),
                            cancellable, error))
-    goto out;
+    {
+      goto out;
+    }
 
   n_unpacked++;
   if (progress_callback)
@@ -195,10 +205,8 @@ unpack_packages_in_root (int          rootfs_fd,
   for (i = 0; i < n_rpmts_elements; i++)
     {
       rpmte te = rpmtsElement (ts, i);
-      const char *nevra = rpmteNEVRA (te);
-      HyPackage pkg = g_hash_table_lookup (nevra_to_pkg, nevra);
-
-      g_assert (pkg);
+      const char *tekey = rpmteKey (te);
+      HyPackage pkg = g_hash_table_lookup (nevra_to_pkg, tekey);
 
       if (pkg == filesystem_package)
         continue;
@@ -280,13 +288,21 @@ rpmostree_internals_builtin_mkroot (int             argc,
 
   hifctx = _rpmostree_libhif_new_default ();
 
-  tmpdir_path = g_strdup ("/var/tmp/rpm-ostree.XXXXXX");
-  if (!glnx_mkdtempat (AT_FDCWD, tmpdir_path, 0700, error))
-    goto out;
-  if (!glnx_opendirat (AT_FDCWD, tmpdir_path, FALSE, &tmpdir_dfd, error))
-    goto out;
-
+  if (opt_rpmmd_cachedir)
+    {
+      if (!glnx_opendirat (AT_FDCWD, opt_rpmmd_cachedir, FALSE, &tmpdir_dfd, error))
+        goto out;
+    }
+  else
+    {
+      tmpdir_path = g_strdup ("/var/tmp/rpm-ostree.XXXXXX");
+      if (!glnx_mkdtempat (AT_FDCWD, tmpdir_path, 0700, error))
+        goto out;
+      if (!glnx_opendirat (AT_FDCWD, tmpdir_path, FALSE, &tmpdir_dfd, error))
+        goto out;
+    }
   _rpmostree_libhif_set_cache_dfd (hifctx, tmpdir_dfd);
+
   hif_context_set_install_root (hifctx, rootpath);
   if (opt_yum_reposdir)
     hif_context_set_repo_dir (hifctx, opt_yum_reposdir);
@@ -339,5 +355,7 @@ rpmostree_internals_builtin_mkroot (int             argc,
 
   exit_status = EXIT_SUCCESS;
  out:
+  if (tmpdir_path)
+    (void) glnx_shutil_rm_rf_at (AT_FDCWD, tmpdir_path, cancellable, NULL);
   return exit_status;
 }

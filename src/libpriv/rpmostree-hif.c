@@ -237,8 +237,7 @@ _rpmostree_get_cache_branch_header (Header hdr)
 char *
 _rpmostree_get_cache_branch_pkg (HyPackage pkg)
 {
-  g_autofree char *hawkey_nevra = hy_package_get_nevra (pkg);
-  return cache_branch_for_nevra (hawkey_nevra);
+  return cache_branch_for_nevra (hif_package_get_nevra (pkg));
 }
   
 static gboolean

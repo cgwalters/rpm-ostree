@@ -51,6 +51,8 @@ void _rpmostree_reset_rpm_sighandlers (void);
 
 void _rpmostree_libhif_set_cache_dfd (HifContext *hifctx, int dfd);
 
+rpmts _rpmostree_libhif_ts_new (HifContext *hifctx);
+
 gboolean _rpmostree_libhif_setup (HifContext    *context,
                                   GCancellable  *cancellable,
                                   GError       **error);
