@@ -806,7 +806,7 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   g_autoptr(GHashTable) pkg_to_ostree_commit =
     g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_free);
   g_autoptr(GHashTable) pkg_to_header = 
-    g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)headerFree);
+    g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_variant_unref);
   HyPackage filesystem_package = NULL;   /* It's special... */
   int r;
   glnx_fd_close int rootfs_fd = -1;
@@ -940,7 +940,8 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   }
 
   rpmdb_ts = rpmtsCreate ();
-  rpmtsSetVSFlags (rpmdb_ts, _RPMVSF_NOSIGNATURES | _RPMVSF_NODIGESTS | RPMTRANS_FLAG_JUSTDB);
+  rpmtsSetVSFlags (rpmdb_ts, _RPMVSF_NOSIGNATURES | _RPMVSF_NODIGESTS);
+  rpmtsSetFlags (rpmdb_ts, RPMTRANS_FLAG_JUSTDB);
 
   { gpointer k,v;
     GHashTableIter hiter;
@@ -956,6 +957,7 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
       }
   }
 
+  rpmtsOrder (rpmdb_ts);
   r = rpmtsRun (rpmdb_ts, NULL, 0);
   if (r < 0)
     {
