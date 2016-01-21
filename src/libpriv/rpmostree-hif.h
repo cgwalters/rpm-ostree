@@ -91,6 +91,14 @@ gboolean _rpmostree_libhif_console_download_import (HifContext                 *
                                                     GCancellable               *cancellable,
                                                     GError                    **error);
 
+gboolean _rpmostree_libhif_console_mkroot (HifContext                 *context,
+                                           OstreeRepo                 *ostreerepo,
+                                           int                         dfd,
+                                           const char                 *path,
+                                           struct RpmOstreeHifInstall *install,
+                                           GCancellable               *cancellable,
+                                           GError                    **error);
+
 static inline void
 _rpmostree_hif_install_cleanup (struct RpmOstreeHifInstall *hifinst)
 {

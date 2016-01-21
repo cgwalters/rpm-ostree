@@ -25,6 +25,7 @@
 #include <rpm/rpmlib.h>
 #include <rpm/rpmlog.h>
 #include <rpm/rpmfi.h>
+#include <rpm/rpmmacro.h>
 #include <rpm/rpmts.h>
 #include <gio/gunixoutputstream.h>
 #include <libhif.h>
@@ -616,7 +617,7 @@ _rpmostree_libhif_console_download_rpms (HifContext     *hifctx,
 }
 
 static gboolean
-unpack_one_package (OstreeRepo   *ostreerepo,
+import_one_package (OstreeRepo   *ostreerepo,
                     int           tmpdir_dfd,
                     HifContext   *hifctx,
                     HyPackage     pkg,
@@ -707,7 +708,7 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
   for (i = 0; i < install->packages_to_download->len; i++)
     {
       HyPackage pkg = install->packages_to_download->pdata[i];
-      if (!unpack_one_package (ostreerepo, pkg_tempdir_dfd, hifctx, pkg,
+      if (!import_one_package (ostreerepo, pkg_tempdir_dfd, hifctx, pkg,
                                cancellable, error))
         goto out;
       hif_state_assert_done (hifstate);
@@ -719,3 +720,260 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
  out:
   return ret;
 }
+
+static gboolean
+ostree_checkout_package (int           dfd,
+                         const char   *path,
+                         HifContext   *hifctx,
+                         HyPackage     pkg,
+                         OstreeRepo   *ostreerepo,
+                         const char   *pkg_ostree_commit,
+                         GCancellable *cancellable,
+                         GError      **error)
+{
+  gboolean ret = FALSE;
+  OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
+                                     OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
+
+  if (!ostree_repo_checkout_tree_at (ostreerepo, &opts, dfd, path,
+                                     pkg_ostree_commit, cancellable, error))
+    goto out;
+  
+  ret = TRUE;
+ out:
+  if (error && *error)
+    g_prefix_error (error, "Unpacking %s: ", hif_package_get_nevra (pkg));
+  return ret;
+}
+
+static gboolean
+add_header_to_ts (rpmts  ts,
+                  GVariant *header_variant,
+                  HyPackage pkg,
+                  GError **error)
+{
+  gboolean ret = FALSE;
+  Header hdr = headerImport ((void*)g_variant_get_data (header_variant),
+                             g_variant_get_size (header_variant),
+                             HEADERIMPORT_COPY);
+  int r = rpmtsAddInstallElement (ts, hdr, (char*)hif_package_get_nevra (pkg), TRUE, NULL);
+  if (r != 0)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_FAILED,
+                   "Failed to add install element for %s",
+                   hif_package_get_filename (pkg));
+      goto out;
+    }
+
+  ret = TRUE;
+ out:
+  headerFree (hdr);
+  return ret;
+}
+
+static void
+set_rpm_macro_define (const char *key, const char *value)
+{
+  g_autofree char *buf = g_strconcat ("%define ", key, " ", value, NULL);
+  /* Calling expand with %define (ignoring the return
+   * value) is apparently the way to change the global
+   * macro context.
+   */
+  free (rpmExpand (buf, NULL));
+}
+
+gboolean
+_rpmostree_libhif_console_mkroot (HifContext    *hifctx,
+                                  OstreeRepo    *ostreerepo,
+                                  int            dfd,
+                                  const char    *path,
+                                  struct RpmOstreeHifInstall *install,
+                                  GCancellable  *cancellable,
+                                  GError       **error)
+{
+  gboolean ret = FALSE;
+  guint progress_sigid;
+  g_autofree char *root_abspath = glnx_fdrel_abspath (dfd, path);
+  g_auto(GLnxConsoleRef) console = { 0, };
+  glnx_unref_object HifState *hifstate = NULL;
+  rpmts ordering_ts = NULL;
+  rpmts rpmdb_ts = NULL;
+  guint i, n_rpmts_elements;
+  g_autoptr(GHashTable) nevra_to_pkg =
+    g_hash_table_new_full (g_str_hash, g_str_equal, NULL, (GDestroyNotify)hy_package_free);
+  g_autoptr(GHashTable) pkg_to_ostree_commit =
+    g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_free);
+  g_autoptr(GHashTable) pkg_to_header = 
+    g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)headerFree);
+  HyPackage filesystem_package = NULL;   /* It's special... */
+  int r;
+  glnx_fd_close int rootfs_fd = -1;
+
+  ordering_ts = rpmtsCreate ();
+  rpmtsSetRootDir (ordering_ts, root_abspath);
+  /* First for the ordering TS, set the dbpath to relative, which will also gain
+   * the root dir.
+   */
+  set_rpm_macro_define ("_dbpath", "/usr/share/rpm");
+
+  /* Don't verify checksums here (we should have done this on ostree
+   * import).  Also, when we do run the transaction, only update the
+   * rpmdb.  Otherwise we unpacked with cpio.
+   */
+  rpmtsSetVSFlags (ordering_ts, _RPMVSF_NOSIGNATURES | _RPMVSF_NODIGESTS | RPMTRANS_FLAG_JUSTDB);
+
+  /* Tell librpm about each one so it can tsort them.  What we really
+   * want is to do this from the rpm-md metadata so that we can fully
+   * parallelize download + unpack.
+   */
+  { g_autoptr(GPtrArray) package_list = NULL;
+
+    package_list = hif_goal_get_packages (hif_context_get_goal (hifctx),
+                                          HIF_PACKAGE_INFO_INSTALL,
+                                          HIF_PACKAGE_INFO_REINSTALL,
+                                          HIF_PACKAGE_INFO_DOWNGRADE,
+                                          HIF_PACKAGE_INFO_UPDATE,
+                                          -1);
+
+    for (i = 0; i < package_list->len; i++)
+      {
+        HyPackage pkg = package_list->pdata[i];
+        glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
+        g_autofree char *cachebranch = _rpmostree_get_cache_branch_pkg (pkg);
+        g_autofree char *cached_rev = NULL; 
+        g_autoptr(GVariant) pkg_commit = NULL;
+        g_autoptr(GVariant) header_variant = NULL;
+
+        if (!ostree_repo_resolve_rev (ostreerepo, cachebranch, FALSE, &cached_rev, error))
+          goto out;
+
+        if (!ostree_repo_load_variant (ostreerepo, OSTREE_OBJECT_TYPE_COMMIT, cached_rev,
+                                       &pkg_commit, error))
+          goto out;
+
+        { g_autoptr(GVariant) pkg_meta = g_variant_get_child_value (pkg_commit, 0);
+          g_autoptr(GVariantDict) pkg_meta_dict = g_variant_dict_new (pkg_meta);
+
+          if (!g_variant_dict_lookup (pkg_meta_dict, "rpmostree.header", "@ay", &header_variant))
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Unable to find 'rpmostree.header' key in commit %s of %s",
+                           cached_rev, hif_package_get_id (pkg));
+              goto out;
+            }
+        }
+
+        if (!add_header_to_ts (ordering_ts, header_variant, pkg, error))
+            goto out;
+
+        g_hash_table_insert (pkg_to_header, hy_package_link (pkg), g_variant_ref (header_variant));
+        g_hash_table_insert (nevra_to_pkg, (char*)hif_package_get_nevra (pkg), hy_package_link (pkg));
+        g_hash_table_insert (pkg_to_ostree_commit, hy_package_link (pkg), g_steal_pointer (&cached_rev));
+
+        if (strcmp (hy_package_get_name (pkg), "filesystem") == 0)
+          filesystem_package = hy_package_link (pkg);
+      }
+  }
+
+  rpmtsOrder (ordering_ts);
+  _rpmostree_reset_rpm_sighandlers ();
+
+  hifstate = hif_state_new ();
+  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                     G_CALLBACK (on_hifstate_percentage_changed), 
+                                     "Unpacking: ");
+
+  glnx_console_lock (&console);
+
+  /* Okay so what's going on in Fedora with incestuous relationship
+   * between the `filesystem`, `setup`, `libgcc` RPMs is actively
+   * ridiculous.  If we unpack libgcc first it writes to /lib64 which
+   * is really /usr/lib64, then filesystem blows up since it wants to symlink
+   * /lib64 -> /usr/lib64.
+   *
+   * Really `filesystem` should be first but it depends on `setup` for
+   * stupid reasons which is hacked around in `%pretrans` which we
+   * don't run.  Just forcibly unpack it first.
+   */
+
+  n_rpmts_elements = (guint)rpmtsNElements (ordering_ts);
+  hif_state_set_number_steps (hifstate, n_rpmts_elements);
+
+  if (!ostree_checkout_package (dfd, path, hifctx, filesystem_package, ostreerepo,
+                                g_hash_table_lookup (pkg_to_ostree_commit, filesystem_package),
+                                cancellable, error))
+    goto out;
+  hif_state_assert_done (hifstate);
+
+  if (!glnx_opendirat (dfd, path, FALSE, &rootfs_fd, error))
+    goto out;
+
+  for (i = 0; i < n_rpmts_elements; i++)
+    {
+      rpmte te = rpmtsElement (ordering_ts, i);
+      const char *tekey = rpmteKey (te);
+      HyPackage pkg = g_hash_table_lookup (nevra_to_pkg, tekey);
+
+      if (pkg == filesystem_package)
+        continue;
+
+      if (!ostree_checkout_package (rootfs_fd, ".", hifctx, pkg, ostreerepo,
+                                    g_hash_table_lookup (pkg_to_ostree_commit, pkg),
+                                    cancellable, error))
+        goto out;
+      hif_state_assert_done (hifstate);
+    }
+
+  if (!glnx_shutil_mkdir_p_at (rootfs_fd, "usr/share/rpm", 0755, cancellable, error))
+    goto out;
+
+  /* Now, we use the separate rpmdb ts which *doesn't* have a rootdir
+   * set, because if it did rpmtsRun() would try to chroot which it
+   * can't, even though we're not trying to run %post scripts now.
+   *
+   * Instead, this rpmts has the dbpath as absolute.
+   */
+  { g_autofree char *rpmdb_abspath = g_strconcat (root_abspath, "/usr/share/rpm", NULL);
+    set_rpm_macro_define ("_dbpath", rpmdb_abspath);
+  }
+
+  rpmdb_ts = rpmtsCreate ();
+  rpmtsSetVSFlags (rpmdb_ts, _RPMVSF_NOSIGNATURES | _RPMVSF_NODIGESTS | RPMTRANS_FLAG_JUSTDB);
+
+  { gpointer k,v;
+    GHashTableIter hiter;
+
+    g_hash_table_iter_init (&hiter, pkg_to_header);
+    while (g_hash_table_iter_next (&hiter, &k, &v))
+      {
+        HyPackage pkg = k;
+        GVariant *header_variant = v;
+
+        if (!add_header_to_ts (rpmdb_ts, header_variant, pkg, error))
+            goto out;
+      }
+  }
+
+  r = rpmtsRun (rpmdb_ts, NULL, 0);
+  if (r < 0)
+    {
+      g_set_error (error,
+                   G_IO_ERROR,
+                   G_IO_ERROR_FAILED,
+                   "Failed to update rpmdb (rpmtsRun code %d)", r);
+      goto out;
+    }
+
+  g_signal_handler_disconnect (hifstate, progress_sigid);
+
+  ret = TRUE;
+ out:
+  if (ordering_ts)
+    rpmtsFree (ordering_ts);
+  if (rpmdb_ts)
+    rpmtsFree (rpmdb_ts);
+  return ret;
+}
+
