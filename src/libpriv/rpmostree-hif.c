@@ -746,6 +746,37 @@ ostree_checkout_package (int           dfd,
   return ret;
 }
 
+static void *
+ts_callback (const void * h, 
+             const rpmCallbackType what, 
+             const rpm_loff_t amount, 
+             const rpm_loff_t total,
+             fnpyKey key,
+             rpmCallbackData data)
+{
+  switch (what)
+    {
+    case RPMCALLBACK_INST_OPEN_FILE:
+      g_assert_not_reached ();
+      break;
+    default:
+      break;
+    }
+
+  return NULL;
+}
+
+static void
+add_header_to_te (rpmte te,
+                  GVariant *header_variant)
+{
+  Header hdr = headerImport ((void*)g_variant_get_data (header_variant),
+                             g_variant_get_size (header_variant),
+                             HEADERIMPORT_COPY);
+  rpmteSetHeader (te, hdr);
+  headerFree (hdr);
+}
+
 static gboolean
 add_header_to_ts (rpmts  ts,
                   GVariant *header_variant,
@@ -942,6 +973,7 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   rpmdb_ts = rpmtsCreate ();
   rpmtsSetVSFlags (rpmdb_ts, _RPMVSF_NOSIGNATURES | _RPMVSF_NODIGESTS);
   rpmtsSetFlags (rpmdb_ts, RPMTRANS_FLAG_JUSTDB);
+  rpmtsSetNotifyCallback (rpmdb_ts, ts_callback, NULL);
 
   { gpointer k,v;
     GHashTableIter hiter;
@@ -958,6 +990,16 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   }
 
   rpmtsOrder (rpmdb_ts);
+
+  for (i = 0; i < n_rpmts_elements; i++)
+    {
+      rpmte te = rpmtsElement (rpmdb_ts, i);
+      const char *tekey = rpmteKey (te);
+      HyPackage pkg = g_hash_table_lookup (nevra_to_pkg, tekey);
+      GVariant *header_variant = g_hash_table_lookup (pkg_to_header, pkg);
+
+      add_header_to_te (te, header_variant);
+    }
   r = rpmtsRun (rpmdb_ts, NULL, 0);
   if (r < 0)
     {
