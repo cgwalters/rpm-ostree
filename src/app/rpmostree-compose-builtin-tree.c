@@ -95,15 +95,6 @@ typedef struct {
   GBytes *serialized_treefile;
 } RpmOstreeTreeComposeContext;
 
-static int
-ptrarray_sort_compare_strings (gconstpointer ap,
-                               gconstpointer bp)
-{
-  char **asp = (gpointer)ap;
-  char **bsp = (gpointer)bp;
-  return strcmp (*asp, *bsp);
-}
-
 static gboolean
 compute_checksum_from_treefile_and_goal (RpmOstreeTreeComposeContext   *self,
                                          HyGoal                         goal,
@@ -127,26 +118,7 @@ compute_checksum_from_treefile_and_goal (RpmOstreeTreeComposeContext   *self,
   /* FIXME; we should also hash the post script */
 
   /* Hash in each package */
-  { _cleanup_hypackagelist_ HyPackageList pkglist = NULL;
-    HyPackage pkg;
-    guint i;
-    gs_unref_ptrarray GPtrArray *nevras = g_ptr_array_new_with_free_func (g_free);
-
-    pkglist = hy_goal_list_installs (goal);
-
-    FOR_PACKAGELIST(pkg, pkglist, i)
-      {
-        g_ptr_array_add (nevras, hy_package_get_nevra (pkg));
-      }
-
-    g_ptr_array_sort (nevras, ptrarray_sort_compare_strings);
-    
-    for (i = 0; i < nevras->len; i++)
-      {
-        const char *nevra = nevras->pdata[i];
-        g_checksum_update (checksum, (guint8*)nevra, strlen (nevra));
-      }
-  }
+  _rpmostree_hif_checksum_goal (checksum, goal);
 
   ret_checksum = g_strdup (g_checksum_get_string (checksum));
 

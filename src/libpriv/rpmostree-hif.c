@@ -453,6 +453,43 @@ package_download_complete_cb (void *user_data,
     }
 }
 
+static int
+ptrarray_sort_compare_strings (gconstpointer ap,
+                               gconstpointer bp)
+{
+  char **asp = (gpointer)ap;
+  char **bsp = (gpointer)bp;
+  return strcmp (*asp, *bsp);
+}
+
+/* Generate a checksum from a goal in a repeatable fashion (ordered
+ * hash of component NEVRAs).  This can be used to see if the goal has
+ * changed from a previous one efficiently.
+ */
+void
+_rpmostree_hif_checksum_goal (GChecksum *checksum,
+                              HyGoal     goal)
+{
+  _cleanup_hypackagelist_ HyPackageList pkglist = NULL;
+  HyPackage pkg;
+  guint i;
+  g_autoptr(GPtrArray) nevras = g_ptr_array_new_with_free_func (g_free);
+
+  pkglist = hy_goal_list_installs (goal);
+  FOR_PACKAGELIST(pkg, pkglist, i)
+    {
+      g_ptr_array_add (nevras, hy_package_get_nevra (pkg));
+    }
+
+  g_ptr_array_sort (nevras, ptrarray_sort_compare_strings);
+    
+  for (i = 0; i < nevras->len; i++)
+    {
+      const char *nevra = nevras->pdata[i];
+      g_checksum_update (checksum, (guint8*)nevra, strlen (nevra));
+    }
+}
+
 /**
  * hif_source_checksum_hy_to_lr:
  **/
