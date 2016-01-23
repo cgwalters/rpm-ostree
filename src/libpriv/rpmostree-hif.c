@@ -201,7 +201,7 @@ _rpmostree_libhif_console_download_metadata (HifContext     *hifctx,
 static char *
 cache_branch_for_nevra (const char *nevra)
 {
-  GString *r = g_string_new ("rpmcache-");
+  GString *r = g_string_new ("rpmostree/rpm-");
   const char *p;
   for (p = nevra; *p; p++)
     {
@@ -239,6 +239,14 @@ char *
 _rpmostree_get_cache_branch_pkg (HyPackage pkg)
 {
   return cache_branch_for_nevra (hif_package_get_nevra (pkg));
+}
+
+static gboolean
+pkg_is_local (HyPackage pkg)
+{
+  HifSource *src = hif_package_get_source (pkg);
+  return (hif_source_is_local (src) || 
+          g_strcmp0 (hy_package_get_reponame (pkg), HY_CMDLINE_REPO_NAME) == 0);
 }
   
 static gboolean
@@ -285,9 +293,6 @@ get_packages_to_download (HifContext  *hifctx,
       hif_package_set_source (pkg, src);
 
       /* this is a local file */
-      if (hif_source_is_local (src) || 
-          g_strcmp0 (hy_package_get_reponame (pkg), HY_CMDLINE_REPO_NAME) == 0)
-        continue;
 
       if (ostreerepo)
         {
@@ -300,16 +305,18 @@ get_packages_to_download (HifContext  *hifctx,
           if (cached_rev)
             continue;
         }
-      else
+      else if (!pkg_is_local (pkg))
         {
           const char *cachepath;
           
           cachepath = hif_package_get_filename (pkg);
 
-          /* Right now we're not re-checksumming cached RPMs, we assume
-           * they are valid.  This is a change from the current libhif
-           * behavior, but I think it's right.  We should record validity
-           * once, then ensure it's immutable after that.
+          /* Right now we're not re-checksumming cached RPMs, we
+           * assume they are valid.  This is a change from the current
+           * libhif behavior, but I think it's right.  We should
+           * record validity once, then ensure it's immutable after
+           * that - which is what happens with the ostree commits
+           * above.
            */
           if (g_file_test (cachepath, G_FILE_TEST_EXISTS))
             continue;
@@ -627,7 +634,15 @@ import_one_package (OstreeRepo   *ostreerepo,
   gboolean ret = FALSE;
   g_autofree char *ostree_commit = NULL;
   glnx_unref_object RpmOstreeUnpacker *unpacker = NULL;
-  const char *pkg_relpath = glnx_basename (hy_package_get_location (pkg));
+  const char *pkg_relpath;
+
+  if (pkg_is_local (pkg))
+    {
+      tmpdir_dfd = AT_FDCWD;
+      pkg_relpath = hif_package_get_filename (pkg);
+    }
+  else
+    pkg_relpath = glnx_basename (hy_package_get_location (pkg)); 
    
   /* TODO - tweak the unpacker flags for containers */
   unpacker = rpmostree_unpacker_new_at (tmpdir_dfd, pkg_relpath,
@@ -644,11 +659,14 @@ import_one_package (OstreeRepo   *ostreerepo,
       goto out;
     }
    
-  if (TEMP_FAILURE_RETRY (unlinkat (tmpdir_dfd, pkg_relpath, 0)) < 0)
+  if (!pkg_is_local (pkg))
     {
-      glnx_set_error_from_errno (error);
-      g_prefix_error (error, "Deleting %s: ", pkg_relpath);
-      goto out;
+      if (TEMP_FAILURE_RETRY (unlinkat (tmpdir_dfd, pkg_relpath, 0)) < 0)
+        {
+          glnx_set_error_from_errno (error);
+          g_prefix_error (error, "Deleting %s: ", pkg_relpath);
+          goto out;
+        }
     }
 
   ret = TRUE;
@@ -689,6 +707,9 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
       {
         HifSource *src = key;
         GPtrArray *src_packages = value;
+
+        if (hif_source_is_local (src))
+          continue;
         
         if (!source_download_packages (src, src_packages, install, pkg_tempdir_dfd, hifstate,
                                        cancellable, error))
@@ -746,6 +767,11 @@ ostree_checkout_package (int           dfd,
   return ret;
 }
 
+typedef struct {
+  FD_t current_trans_fd;
+  int tmp_metadata_dfd;
+} TransactionData;
+
 static void *
 ts_callback (const void * h, 
              const rpmCallbackType what, 
@@ -754,11 +780,23 @@ ts_callback (const void * h,
              fnpyKey key,
              rpmCallbackData data)
 {
+  TransactionData *tdata = data;
+
   switch (what)
     {
     case RPMCALLBACK_INST_OPEN_FILE:
-      g_assert_not_reached ();
+      {
+        g_autofree char *path = glnx_fdrel_abspath (tdata->tmp_metadata_dfd, h);
+        g_assert (tdata->current_trans_fd == NULL);
+        tdata->current_trans_fd = Fopen (path, "r.ufdio");
+        return tdata->current_trans_fd;
+      }
       break;
+
+    case RPMCALLBACK_INST_CLOSE_FILE:
+      g_clear_pointer (&tdata->current_trans_fd, Fclose);
+      break;
+
     default:
       break;
     }
@@ -766,28 +804,27 @@ ts_callback (const void * h,
   return NULL;
 }
 
-static void
-add_header_to_te (rpmte te,
-                  GVariant *header_variant)
-{
-  Header hdr = headerImport ((void*)g_variant_get_data (header_variant),
-                             g_variant_get_size (header_variant),
-                             HEADERIMPORT_COPY);
-  rpmteSetHeader (te, hdr);
-  headerFree (hdr);
-}
-
 static gboolean
-add_header_to_ts (rpmts  ts,
-                  GVariant *header_variant,
-                  HyPackage pkg,
-                  GError **error)
+add_to_transaction (rpmts  ts,
+                    HyPackage pkg,
+                    int tmp_metadata_dfd,
+                    GError **error)
 {
   gboolean ret = FALSE;
-  Header hdr = headerImport ((void*)g_variant_get_data (header_variant),
-                             g_variant_get_size (header_variant),
-                             HEADERIMPORT_COPY);
-  int r = rpmtsAddInstallElement (ts, hdr, (char*)hif_package_get_nevra (pkg), TRUE, NULL);
+  int r;
+  Header hdr = NULL;
+  glnx_fd_close int metadata_fd = -1;
+
+  if ((metadata_fd = openat (tmp_metadata_dfd, hif_package_get_nevra (pkg), O_RDONLY | O_CLOEXEC)) < 0)
+    {
+      glnx_set_error_from_errno (error);
+      goto out;
+    }
+
+  if (!rpmostree_unpacker_read_metainfo (metadata_fd, &hdr, NULL, NULL, error))
+    goto out;
+          
+  r = rpmtsAddInstallElement (ts, hdr, (char*)hif_package_get_nevra (pkg), TRUE, NULL);
   if (r != 0)
     {
       g_set_error (error,
@@ -800,7 +837,8 @@ add_header_to_ts (rpmts  ts,
 
   ret = TRUE;
  out:
-  headerFree (hdr);
+  if (hdr)
+    headerFree (hdr);
   return ret;
 }
 
@@ -826,6 +864,7 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
 {
   gboolean ret = FALSE;
   guint progress_sigid;
+  TransactionData tdata = { 0, -1 };
   g_autofree char *root_abspath = glnx_fdrel_abspath (dfd, path);
   g_auto(GLnxConsoleRef) console = { 0, };
   glnx_unref_object HifState *hifstate = NULL;
@@ -836,11 +875,18 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
     g_hash_table_new_full (g_str_hash, g_str_equal, NULL, (GDestroyNotify)hy_package_free);
   g_autoptr(GHashTable) pkg_to_ostree_commit =
     g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_free);
-  g_autoptr(GHashTable) pkg_to_header = 
-    g_hash_table_new_full (NULL, NULL, (GDestroyNotify)hy_package_free, (GDestroyNotify)g_variant_unref);
   HyPackage filesystem_package = NULL;   /* It's special... */
   int r;
   glnx_fd_close int rootfs_fd = -1;
+  char *tmp_metadata_dir_path = NULL;
+  glnx_fd_close int tmp_metadata_dfd = -1;
+
+  glnx_console_lock (&console);
+
+  if (!rpmostree_mkdtemp ("/tmp/rpmostree-metadata-XXXXXX", &tmp_metadata_dir_path,
+                          &tmp_metadata_dfd, error))
+    goto out;
+  tdata.tmp_metadata_dfd = tmp_metadata_dfd;
 
   ordering_ts = rpmtsCreate ();
   rpmtsSetRootDir (ordering_ts, root_abspath);
@@ -887,19 +933,25 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
         { g_autoptr(GVariant) pkg_meta = g_variant_get_child_value (pkg_commit, 0);
           g_autoptr(GVariantDict) pkg_meta_dict = g_variant_dict_new (pkg_meta);
 
-          if (!g_variant_dict_lookup (pkg_meta_dict, "rpmostree.header", "@ay", &header_variant))
+          if (!g_variant_dict_lookup (pkg_meta_dict, "rpmostree.metadata", "@ay", &header_variant))
             {
               g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                            "Unable to find 'rpmostree.header' key in commit %s of %s",
                            cached_rev, hif_package_get_id (pkg));
               goto out;
             }
-        }
 
-        if (!add_header_to_ts (ordering_ts, header_variant, pkg, error))
+          if (!glnx_file_replace_contents_at (tmp_metadata_dfd, hif_package_get_nevra (pkg),
+                                              g_variant_get_data (header_variant),
+                                              g_variant_get_size (header_variant),
+                                              GLNX_FILE_REPLACE_NODATASYNC,
+                                              cancellable, error))
             goto out;
 
-        g_hash_table_insert (pkg_to_header, hy_package_link (pkg), g_variant_ref (header_variant));
+          if (!add_to_transaction (ordering_ts, pkg, tmp_metadata_dfd, error))
+            goto out;
+        }
+
         g_hash_table_insert (nevra_to_pkg, (char*)hif_package_get_nevra (pkg), hy_package_link (pkg));
         g_hash_table_insert (pkg_to_ostree_commit, hy_package_link (pkg), g_steal_pointer (&cached_rev));
 
@@ -915,8 +967,6 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   progress_sigid = g_signal_connect (hifstate, "percentage-changed",
                                      G_CALLBACK (on_hifstate_percentage_changed), 
                                      "Unpacking: ");
-
-  glnx_console_lock (&console);
 
   /* Okay so what's going on in Fedora with incestuous relationship
    * between the `filesystem`, `setup`, `libgcc` RPMs is actively
@@ -973,33 +1023,22 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   rpmdb_ts = rpmtsCreate ();
   rpmtsSetVSFlags (rpmdb_ts, _RPMVSF_NOSIGNATURES | _RPMVSF_NODIGESTS);
   rpmtsSetFlags (rpmdb_ts, RPMTRANS_FLAG_JUSTDB);
-  rpmtsSetNotifyCallback (rpmdb_ts, ts_callback, NULL);
+  rpmtsSetNotifyCallback (rpmdb_ts, ts_callback, &tdata);
 
   { gpointer k,v;
     GHashTableIter hiter;
 
-    g_hash_table_iter_init (&hiter, pkg_to_header);
+    g_hash_table_iter_init (&hiter, pkg_to_ostree_commit);
     while (g_hash_table_iter_next (&hiter, &k, &v))
       {
         HyPackage pkg = k;
-        GVariant *header_variant = v;
 
-        if (!add_header_to_ts (rpmdb_ts, header_variant, pkg, error))
-            goto out;
+        if (!add_to_transaction (rpmdb_ts, pkg, tmp_metadata_dfd, error))
+          goto out;
       }
   }
 
   rpmtsOrder (rpmdb_ts);
-
-  for (i = 0; i < n_rpmts_elements; i++)
-    {
-      rpmte te = rpmtsElement (rpmdb_ts, i);
-      const char *tekey = rpmteKey (te);
-      HyPackage pkg = g_hash_table_lookup (nevra_to_pkg, tekey);
-      GVariant *header_variant = g_hash_table_lookup (pkg_to_header, pkg);
-
-      add_header_to_te (te, header_variant);
-    }
   r = rpmtsRun (rpmdb_ts, NULL, 0);
   if (r < 0)
     {

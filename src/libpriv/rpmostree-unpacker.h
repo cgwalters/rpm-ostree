@@ -23,6 +23,7 @@
 #include <ostree.h>
 
 #include "libglnx.h"
+#include <rpm/rpmlib.h>
 
 typedef struct RpmOstreeUnpacker RpmOstreeUnpacker;
 
@@ -46,6 +47,13 @@ gboolean rpmostree_unpacker_unpack_to_dfd (RpmOstreeUnpacker *unpacker,
                                            int                dfd,
                                            GCancellable      *cancellable,
                                            GError           **error);
+
+gboolean
+rpmostree_unpacker_read_metainfo (int fd,
+                                  Header *out_header,
+                                  gsize *out_cpio_offset,
+                                  rpmfi *out_fi,
+                                  GError **error);
 
 const char *rpmostree_unpacker_get_ostree_branch (RpmOstreeUnpacker *unpacker);
 

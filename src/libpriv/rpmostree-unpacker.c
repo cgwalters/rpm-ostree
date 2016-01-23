@@ -32,6 +32,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <sys/capability.h>
+#include <gio/gunixinputstream.h>
 #include "rpmostree-unpacker.h"
 #include "rpmostree-hif.h"
 #include "rpmostree-ostree-libarchive-copynpaste.h"
@@ -56,6 +57,7 @@ struct RpmOstreeUnpacker
   gboolean owns_fd;
   Header hdr;
   rpmfi fi;
+  off_t cpio_offset;
   GHashTable *fscaps;
   RpmOstreeUnpackerFlags flags;
 
@@ -158,17 +160,21 @@ rpm2cpio (int fd, GError **error)
     }
 }
 
-static gboolean
-rpm_parse_hdr_fi (int fd, rpmfi *out_fi, Header *out_header,
-                  GError **error)
+gboolean
+rpmostree_unpacker_read_metainfo (int fd,
+                                  Header *out_header,
+                                  gsize *out_cpio_offset,
+                                  rpmfi *out_fi,
+                                  GError **error)
 {
   gboolean ret = FALSE;
-  g_autofree char *abspath = g_strdup_printf ("/proc/self/fd/%d", fd);
-  FD_t rpmfd;
-  rpmfi fi = NULL;
-  Header hdr = NULL;
   rpmts ts = NULL;
+  FD_t rpmfd;
   int r;
+  Header ret_header = NULL;
+  rpmfi ret_fi = NULL;
+  gsize ret_cpio_offset;
+  g_autofree char *abspath = g_strdup_printf ("/proc/self/fd/%d", fd);
 
   ts = rpmtsCreate ();
   _rpmostree_reset_rpm_sighandlers ();
@@ -193,7 +199,7 @@ rpm_parse_hdr_fi (int fd, rpmfi *out_fi, Header *out_header,
       goto out;
     }
 
-  if ((r = rpmReadPackageFile (ts, rpmfd, abspath, &hdr)) != RPMRC_OK)
+  if ((r = rpmReadPackageFile (ts, rpmfd, abspath, &ret_header)) != RPMRC_OK)
     {
       g_set_error (error,
                    G_IO_ERROR,
@@ -202,19 +208,27 @@ rpm_parse_hdr_fi (int fd, rpmfi *out_fi, Header *out_header,
                     abspath);
       goto out;
     }
-  
-  fi = rpmfiNew (ts, hdr, RPMTAG_BASENAMES, (RPMFI_NOHEADER | RPMFI_FLAGS_INSTALL));
-  fi = rpmfiInit (fi, 0);
 
-  *out_fi = g_steal_pointer (&fi);
-  *out_header = g_steal_pointer (&hdr);
+  ret_cpio_offset = Ftell (rpmfd);
+  
+  if (out_fi)
+    {
+      ret_fi = rpmfiNew (ts, ret_header, RPMTAG_BASENAMES, (RPMFI_NOHEADER | RPMFI_FLAGS_INSTALL));
+      ret_fi = rpmfiInit (ret_fi, 0);
+    }
+
   ret = TRUE;
+  if (out_header)
+    *out_header = g_steal_pointer (&ret_header);
+  if (out_fi)
+    *out_fi = g_steal_pointer (&ret_fi);
+  if (out_cpio_offset)
+    *out_cpio_offset = ret_cpio_offset;
  out:
-  _rpmostree_reset_rpm_sighandlers ();
-  if (fi != NULL)
-    rpmfiFree (fi);
-  if (hdr != NULL)
-    headerFree (hdr);
+  if (ret_header)
+    headerFree (ret_header);
+  if (rpmfd)
+    (void) Fclose (rpmfd);
   return ret;
 }
 
@@ -225,13 +239,13 @@ rpmostree_unpacker_new_fd (int fd, RpmOstreeUnpackerFlags flags, GError **error)
   Header hdr = NULL;
   rpmfi fi = NULL;
   struct archive *archive;
+  gsize cpio_offset;
 
   archive = rpm2cpio (fd, error);  
   if (archive == NULL)
     goto out;
 
-  rpm_parse_hdr_fi (fd, &fi, &hdr, error);
-  if (fi == NULL)
+  if (!rpmostree_unpacker_read_metainfo (fd, &hdr, &cpio_offset, &fi, error))
     goto out;
 
   ret = g_object_new (RPMOSTREE_TYPE_UNPACKER, NULL);
@@ -240,6 +254,7 @@ rpmostree_unpacker_new_fd (int fd, RpmOstreeUnpackerFlags flags, GError **error)
   ret->archive = g_steal_pointer (&archive);
   ret->flags = flags;
   ret->hdr = g_steal_pointer (&hdr);
+  ret->cpio_offset = cpio_offset;
 
  out:
   if (archive)
@@ -833,13 +848,52 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
   return ret;
 }
 
-static GBytes *
-rpm_header_to_export_bytes (Header h)
+static gboolean
+get_lead_sig_header_as_bytes (RpmOstreeUnpacker *self,
+                              GBytes  **out_metadata,
+                              GCancellable *cancellable,
+                              GError  **error)
 {
-  guint hsize;
-  void *p = headerExport (h, &hsize);
-  headerLink (h);
-  return g_bytes_new_with_free_func (p, hsize, (GDestroyNotify)headerFree, h);
+  gboolean ret = FALSE;
+  glnx_unref_object GInputStream *uin = NULL;
+  g_autofree char *buf = NULL;
+  char *bufp;
+  size_t bytes_remaining;
+
+  /* Inline a pread() based reader here to avoid affecting the file
+   * offset since both librpm and libarchive have references.
+   */
+  buf = g_malloc (self->cpio_offset);
+  bufp = buf;
+  bytes_remaining = self->cpio_offset;
+  while (bytes_remaining > 0)
+    {
+      ssize_t bytes_read;
+      do
+        bytes_read = pread (self->fd, bufp, bytes_remaining, bufp - buf);
+      while (bytes_read < 0 && errno == EINTR);
+      if (bytes_read < 0)
+        {
+          glnx_set_error_from_errno (error);
+          goto out;
+        }
+      if (bytes_read == 0)
+        break;
+      bufp += bytes_read;
+      bytes_remaining -= bytes_read;
+    }
+  if (bytes_remaining > 0)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Failed to read %" G_GUINT64_FORMAT " bytes of metadata",
+                   bytes_remaining);
+      goto out;
+    }
+  
+  ret = TRUE;
+  *out_metadata = g_bytes_new_take (g_steal_pointer (&buf), self->cpio_offset);
+ out:
+  return ret;
 }
 
 gboolean
@@ -888,10 +942,13 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   mtree = ostree_mutable_tree_new ();
   ostree_mutable_tree_set_metadata_checksum (mtree, default_dir_checksum);
 
-  /* Store the RPM Header in the commit metadata */
-  { g_autoptr(GBytes) header_bytes = rpm_header_to_export_bytes (self->hdr);
-    g_variant_builder_add (&metadata_builder, "{sv}", "rpmostree.header",
-                           g_variant_new_from_bytes ((GVariantType*)"ay", header_bytes, TRUE));
+  { g_autoptr(GBytes) metadata = NULL;
+    
+    if (!get_lead_sig_header_as_bytes (self, &metadata, cancellable, error))
+      goto out;
+
+    g_variant_builder_add (&metadata_builder, "{sv}", "rpmostree.metadata",
+                           g_variant_new_from_bytes ((GVariantType*)"ay", metadata, TRUE));
   }
                                                                           
   while (TRUE)
