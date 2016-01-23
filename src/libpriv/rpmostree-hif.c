@@ -786,7 +786,8 @@ ts_callback (const void * h,
     {
     case RPMCALLBACK_INST_OPEN_FILE:
       {
-        g_autofree char *path = glnx_fdrel_abspath (tdata->tmp_metadata_dfd, h);
+        const char *nevra = (char *) key;
+        g_autofree char *path = glnx_fdrel_abspath (tdata->tmp_metadata_dfd, nevra);
         g_assert (tdata->current_trans_fd == NULL);
         tdata->current_trans_fd = Fopen (path, "r.ufdio");
         return tdata->current_trans_fd;
