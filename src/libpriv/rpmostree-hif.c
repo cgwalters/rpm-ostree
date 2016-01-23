@@ -198,12 +198,12 @@ _rpmostree_libhif_console_download_metadata (HifContext     *hifctx,
   return ret;
 }
 
-static char *
-cache_branch_for_nevra (const char *nevra)
+static void
+append_quoted (GString *r, const char *value)
 {
-  GString *r = g_string_new ("rpmostree/rpm-");
   const char *p;
-  for (p = nevra; *p; p++)
+
+  for (p = value; *p; p++)
     {
       const char c = *p;
       switch (c)
@@ -226,19 +226,35 @@ cache_branch_for_nevra (const char *nevra)
 
       g_string_append_printf (r, "_%02X", c);
     }
+}
+
+static char *
+cache_branch_for_n_evr_a (const char *name, const char *evr, const char *arch)
+{
+  GString *r = g_string_new ("rpmostree/pkg/");
+  append_quoted (r, name);
+  g_string_append_c (r, '/');
+  append_quoted (r, evr);
+  g_string_append_c (r, '.');
+  append_quoted (r, arch);
   return g_string_free (r, FALSE);
 }
 
 char *
 _rpmostree_get_cache_branch_header (Header hdr)
 {
-  return cache_branch_for_nevra (headerGetAsString (hdr, RPMTAG_NEVRA));
+  g_autofree char *name = headerGetAsString (hdr, RPMTAG_NAME);
+  g_autofree char *evr = headerGetAsString (hdr, RPMTAG_EVR);
+  g_autofree char *arch = headerGetAsString (hdr, RPMTAG_ARCH);
+  return cache_branch_for_n_evr_a (name, evr, arch);
 }
   
 char *
 _rpmostree_get_cache_branch_pkg (HyPackage pkg)
 {
-  return cache_branch_for_nevra (hif_package_get_nevra (pkg));
+  return cache_branch_for_n_evr_a (hy_package_get_name (pkg),
+                                   hy_package_get_evr (pkg),
+                                   hy_package_get_arch (pkg));
 }
 
 static gboolean
