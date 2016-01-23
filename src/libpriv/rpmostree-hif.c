@@ -772,6 +772,11 @@ ostree_checkout_package (int           dfd,
   OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
                                      OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
 
+  /* For now... to be crash safe we'd need to duplicate some of the
+   * boot-uuid/fsync gating at a higher level.
+   */
+  opts.disable_fsync = TRUE;
+
   if (!ostree_repo_checkout_tree_at (ostreerepo, &opts, dfd, path,
                                      pkg_ostree_commit, cancellable, error))
     goto out;

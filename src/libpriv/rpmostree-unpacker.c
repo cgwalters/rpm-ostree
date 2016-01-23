@@ -654,6 +654,15 @@ cap_t_to_vfs (cap_t cap_d, struct vfs_cap_data *rawvfscap, int *out_size)
     rawvfscap->magic_etc = GUINT32_TO_LE(magic|VFS_CAP_FLAGS_EFFECTIVE);
 }
 
+static char *
+tweak_path_for_ostree (const char *path)
+{
+  path = path_relative (path);
+  if (g_str_has_prefix (path, "etc/"))
+    return g_strconcat ("usr/", path, NULL);
+  return g_strdup (path);
+}
+
 static gboolean
 import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
                                        GHashTable        *rpmfi_overrides,
@@ -667,17 +676,16 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
 {
   gboolean ret = FALSE;
   g_autoptr(GPtrArray) pathname_parts = NULL;
-  const char *pathname;
+  g_autofree char *pathname = NULL;
   glnx_unref_object OstreeMutableTree *parent = NULL;
   const char *basename;
-  const char *hardlink;
   const struct stat *st;
   g_auto(GVariantBuilder) xattr_builder;
   rpmfi fi = NULL;
 
   g_variant_builder_init (&xattr_builder, (GVariantType*)"a(ayay)");
   
-  pathname = path_relative (archive_entry_pathname (entry)); 
+  pathname = tweak_path_for_ostree (archive_entry_pathname (entry));
   st = archive_entry_stat (entry);
   { gpointer v;
     if (g_hash_table_lookup_extended (rpmfi_overrides, pathname, NULL, &v))
@@ -735,17 +743,15 @@ import_one_libarchive_entry_to_ostree (RpmOstreeUnpacker *self,
       basename = (const char*)pathname_parts->pdata[pathname_parts->len-1];
     }
 
-  hardlink = archive_entry_hardlink (entry);
-  if (hardlink)
+  if (archive_entry_hardlink (entry))
     {
+      g_autofree char *hardlink = tweak_path_for_ostree (archive_entry_hardlink (entry));
       const char *hardlink_basename;
       g_autoptr(GPtrArray) hardlink_split_path = NULL;
       glnx_unref_object OstreeMutableTree *hardlink_source_parent = NULL;
       glnx_unref_object OstreeMutableTree *hardlink_source_subdir = NULL;
       g_autofree char *hardlink_source_checksum = NULL;
 
-      hardlink = path_relative (hardlink);
-      
       g_assert (parent != NULL);
 
       if (!rpmostree_split_path_ptrarray_validate (hardlink, &hardlink_split_path, error))
