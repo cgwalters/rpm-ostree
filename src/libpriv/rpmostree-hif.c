@@ -33,6 +33,7 @@
 #include <libhif/hif-package.h>
 
 #include "rpmostree-hif.h"
+#include "rpmostree-rpm-util.h"
 #include "rpmostree-unpacker.h"
 #include "rpmostree-cleanup.h"
 
@@ -80,6 +81,43 @@ _rpmostree_libhif_new_default (void)
   hif_context_set_yumdb_enabled (hifctx, FALSE);
 
   return hifctx;
+}
+
+HifContext *
+_rpmostree_libhif_new (int rpmmd_cache_dfd,
+                       const char *installroot,
+                       const char *repos_dir,
+                       const char *const *enabled_repos,
+                       GCancellable *cancellable,
+                       GError **error)
+{
+  gboolean ret = FALSE;
+  glnx_unref_object HifContext *hifctx = _rpmostree_libhif_new_default ();
+
+  _rpmostree_libhif_set_cache_dfd (hifctx, rpmmd_cache_dfd);
+  if (repos_dir)
+    {
+      hif_context_set_repo_dir (hifctx, repos_dir);
+      _rpmostree_libhif_repos_disable_all (hifctx);
+    }
+
+  if (!_rpmostree_libhif_setup (hifctx, cancellable, error))
+    goto out;
+
+  { const char * const *strviter = enabled_repos;
+    for (; strviter && *strviter; strviter++)
+      {
+        const char *reponame = *strviter;
+        if (!_rpmostree_libhif_repos_enable_by_name (hifctx, reponame, error))
+          goto out;
+      }
+  }
+
+  ret = TRUE;
+ out:
+  if (ret)
+    return g_steal_pointer (&hifctx);
+  return NULL;
 }
 
 void
@@ -369,6 +407,9 @@ _rpmostree_libhif_console_prepare_install (HifContext           *hifctx,
   if (!get_packages_to_download (hifctx, ostreerepo, &out_install->packages_to_download, error))
     goto out;
 
+  rpmostree_print_transaction (hifctx);
+  g_print ("\n  Need to download %u packages\n", out_install->packages_to_download->len);
+
   ret = TRUE;
  out:
   return ret;
@@ -643,15 +684,10 @@ _rpmostree_libhif_console_download_rpms (HifContext     *hifctx,
                                          GError        **error)
 {
   gboolean ret = FALSE;
-  gs_unref_object HifState *hifstate = hif_state_new ();
   g_auto(GLnxConsoleRef) console = { 0, };
   guint progress_sigid;
   GHashTableIter hiter;
   gpointer key, value;
-
-  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
-                                     G_CALLBACK (on_hifstate_percentage_changed), 
-                                     "Downloading packages:");
 
   glnx_console_lock (&console);
 
@@ -662,14 +698,21 @@ _rpmostree_libhif_console_download_rpms (HifContext     *hifctx,
       {
         HifSource *src = key;
         GPtrArray *src_packages = value;
+        gs_unref_object HifState *hifstate = hif_state_new ();
+        g_autofree char *prefix = g_strconcat ("Downloading packages (", hif_source_get_id (src), ")", NULL); 
+
+        progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                           G_CALLBACK (on_hifstate_percentage_changed), 
+                                           prefix);
       
         if (!source_download_packages (src, src_packages, install, target_dfd, hifstate,
                                        cancellable, error))
           goto out;
+
+        g_signal_handler_disconnect (hifstate, progress_sigid);
       }
   }
 
-  g_signal_handler_disconnect (hifstate, progress_sigid);
 
   ret = TRUE;
  out:
@@ -735,7 +778,6 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
                                            GError              **error)
 {
   gboolean ret = FALSE;
-  gs_unref_object HifState *hifstate = hif_state_new ();
   g_auto(GLnxConsoleRef) console = { 0, };
   glnx_fd_close int pkg_tempdir_dfd = -1;
   g_autofree char *pkg_tempdir = NULL;
@@ -743,10 +785,6 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
   GHashTableIter hiter;
   gpointer key, value;
   guint i;
-
-  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
-                                     G_CALLBACK (on_hifstate_percentage_changed), 
-                                     "Downloading packages:");
 
   glnx_console_lock (&console);
 
@@ -758,37 +796,46 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
     g_hash_table_iter_init (&hiter, source_to_packages);
     while (g_hash_table_iter_next (&hiter, &key, &value))
       {
+        glnx_unref_object HifState *hifstate = hif_state_new ();
         HifSource *src = key;
         GPtrArray *src_packages = value;
+        g_autofree char *prefix = g_strconcat ("Downloading packages (", hif_source_get_id (src), ")", NULL); 
 
         if (hif_source_is_local (src))
           continue;
+
+        progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                           G_CALLBACK (on_hifstate_percentage_changed), 
+                                           prefix);
         
         if (!source_download_packages (src, src_packages, install, pkg_tempdir_dfd, hifstate,
                                        cancellable, error))
           goto out;
+
+        g_signal_handler_disconnect (hifstate, progress_sigid);
       }
   }
 
-  (void) hif_state_reset (hifstate);
-  g_signal_handler_disconnect (hifstate, progress_sigid);
+  { 
+    glnx_unref_object HifState *hifstate = hif_state_new ();
 
-  hif_state_set_number_steps (hifstate, install->packages_to_download->len);
-  progress_sigid = g_signal_connect (hifstate, "percentage-changed",
-                                     G_CALLBACK (on_hifstate_percentage_changed), 
-                                     "Importing packages:");
+    hif_state_set_number_steps (hifstate, install->packages_to_download->len);
+    progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                       G_CALLBACK (on_hifstate_percentage_changed), 
+                                       "Importing packages:");
 
+    for (i = 0; i < install->packages_to_download->len; i++)
+      {
+        HyPackage pkg = install->packages_to_download->pdata[i];
+        if (!import_one_package (ostreerepo, pkg_tempdir_dfd, hifctx, pkg,
+                                 cancellable, error))
+          goto out;
+        hif_state_assert_done (hifstate);
+      }
 
-  for (i = 0; i < install->packages_to_download->len; i++)
-    {
-      HyPackage pkg = install->packages_to_download->pdata[i];
-      if (!import_one_package (ostreerepo, pkg_tempdir_dfd, hifctx, pkg,
-                               cancellable, error))
-        goto out;
-      hif_state_assert_done (hifstate);
-    }
+    g_signal_handler_disconnect (hifstate, progress_sigid);
+  }
 
-  g_signal_handler_disconnect (hifstate, progress_sigid);
 
   ret = TRUE;
  out:
@@ -1112,6 +1159,8 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
 
   ret = TRUE;
  out:
+  if (tmp_metadata_dir_path)
+    (void) glnx_shutil_rm_rf_at (AT_FDCWD, tmp_metadata_dir_path, cancellable, NULL);
   if (ordering_ts)
     rpmtsFree (ordering_ts);
   if (rpmdb_ts)

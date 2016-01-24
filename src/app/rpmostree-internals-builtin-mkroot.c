@@ -105,7 +105,13 @@ rpmostree_internals_builtin_mkroot (int             argc,
       goto out;
     }
 
-  hifctx = _rpmostree_libhif_new_default ();
+  if (g_file_test (rootpath, G_FILE_TEST_EXISTS))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Target root %s already exists", rootpath);
+      goto out;
+    }
+
 
   if (opt_rpmmd_cachedir)
     {
@@ -120,24 +126,12 @@ rpmostree_internals_builtin_mkroot (int             argc,
       if (!glnx_opendirat (AT_FDCWD, tmpdir_path, FALSE, &tmpdir_dfd, error))
         goto out;
     }
-  _rpmostree_libhif_set_cache_dfd (hifctx, tmpdir_dfd);
 
-  hif_context_set_install_root (hifctx, rootpath);
-  if (opt_yum_reposdir)
-    hif_context_set_repo_dir (hifctx, opt_yum_reposdir);
-    
-  if (!_rpmostree_libhif_setup (hifctx, cancellable, error))
+  hifctx = _rpmostree_libhif_new (tmpdir_dfd, rootpath, opt_yum_reposdir,
+                                  (const char * const *)opt_enable_yum_repos,
+                                  cancellable, error);
+  if (!hifctx)
     goto out;
-  _rpmostree_libhif_repos_disable_all (hifctx);
-
-  { char **strviter = opt_enable_yum_repos;
-    for (; strviter && *strviter; strviter++)
-      {
-        const char *reponame = *strviter;
-        if (!_rpmostree_libhif_repos_enable_by_name (hifctx, reponame, error))
-          goto out;
-      }
-  }
 
   /* --- Downloading metadata --- */
   if (!_rpmostree_libhif_console_download_metadata (hifctx, cancellable, error))
@@ -155,9 +149,6 @@ rpmostree_internals_builtin_mkroot (int             argc,
   /* --- Resolving dependencies --- */
   if (!_rpmostree_libhif_console_prepare_install (hifctx, ostreerepo, &hifinstall, cancellable, error))
     goto out;
-
-  rpmostree_print_transaction (hifctx);
-  g_print ("Will download %u packages\n", hifinstall.packages_to_download->len);
 
   /* --- Download and import as necessary --- */
   if (!_rpmostree_libhif_console_download_import (hifctx, ostreerepo, &hifinstall,

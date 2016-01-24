@@ -23,6 +23,7 @@
 #include <gio/gio.h>
 #include <libhif.h>
 #include <libhif/hif-utils.h>
+#include <libhif/hif-package.h>
 #include <ostree.h>
 
 #include "libglnx.h"
@@ -46,6 +47,13 @@ struct RpmOstreePackageDownloadMetrics {
 typedef struct RpmOstreePackageDownloadMetrics RpmOstreePackageDownloadMetrics;
 
 HifContext *_rpmostree_libhif_new_default (void);
+
+HifContext *_rpmostree_libhif_new (int rpmmd_cache_dfd,
+                                   const char *installroot,
+                                   const char *repos_dir,
+                                   const char *const *enabled_repos,
+                                   GCancellable *cancellable,
+                                   GError **error);
 
 void _rpmostree_reset_rpm_sighandlers (void);
 
