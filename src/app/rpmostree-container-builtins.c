@@ -47,6 +47,90 @@ static GOptionEntry assemble_option_entries[] = {
   { NULL }
 };
 
+typedef struct {
+  char *userroot_base;
+  int userroot_dfd;
+
+  OstreeRepo *repo;
+  HifContext *hifctx;
+
+  int rpmmd_dfd;
+} ROContainerContext;
+
+#define RO_CONTAINER_CONTEXT_INIT { .userroot_dfd = -1, .rpmmd_dfd = -1 }
+
+static gboolean
+roc_context_init_core (ROContainerContext *rocctx,
+                       GError            **error)
+{
+  gboolean ret = FALSE;
+
+  rocctx->userroot_base = get_current_dir_name ();
+  if (!glnx_opendirat (AT_FDCWD, rocctx->userroot_base, TRUE, &rocctx->userroot_dfd, error))
+    goto out;
+
+  { g_autofree char *repo_pathstr = g_strconcat (rocctx->userroot_base, "/repo", NULL);
+    g_autoptr(GFile) repo_path = g_file_new_for_path (repo_pathstr);
+    rocctx->repo = ostree_repo_new (repo_path);
+  }
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+roc_context_init (ROContainerContext *rocctx,
+                  GError            **error)
+{
+  gboolean ret = FALSE;
+  
+  if (!roc_context_init_core (rocctx, error))
+    goto out;
+
+  if (!ostree_repo_open (rocctx->repo, NULL, error))
+    goto out;
+
+  if (!glnx_opendirat (rocctx->userroot_dfd, "rpm-md", FALSE, &rocctx->rpmmd_dfd, error))
+    goto out;
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static gboolean
+roc_context_prepare_for_root (ROContainerContext *rocctx,
+                              const char         *target,
+                              GError            **error)
+{
+  gboolean ret = FALSE;
+  g_autofree char *abs_instroot = glnx_fdrel_abspath (rocctx->userroot_dfd, target);
+
+  rocctx->hifctx = _rpmostree_libhif_new (rocctx->rpmmd_dfd, abs_instroot, NULL,
+                                          NULL, NULL, error);
+  if (!rocctx->hifctx)
+    goto out;
+
+  ret = TRUE;
+ out:
+  return ret;
+}
+
+static void
+roc_context_deinit (ROContainerContext *rocctx)
+{
+  g_free (rocctx->userroot_base);
+  if (rocctx->userroot_dfd)
+    (void) close (rocctx->userroot_dfd);
+  g_clear_object (&rocctx->repo);
+  if (rocctx->rpmmd_dfd)
+    (void) close (rocctx->rpmmd_dfd);
+  g_clear_object (&rocctx->hifctx);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(ROContainerContext, roc_context_deinit)
+
 int
 rpmostree_container_builtin_init (int             argc,
                                   char          **argv,
@@ -54,10 +138,9 @@ rpmostree_container_builtin_init (int             argc,
                                   GError        **error)
 {
   int exit_status = EXIT_FAILURE;
+  g_auto(ROContainerContext) rocctx_data = RO_CONTAINER_CONTEXT_INIT;
+  ROContainerContext *rocctx = &rocctx_data;
   GOptionContext *context = g_option_context_new ("");
-  g_autofree char *userroot_base = get_current_dir_name ();
-  glnx_fd_close int userroot_dfd = -1;
-  glnx_unref_object OstreeRepo *ostreerepo = NULL;
   static const char* const directories[] = { "repo", "rpm-md", "roots" };
   guint i;
   
@@ -70,21 +153,17 @@ rpmostree_container_builtin_init (int             argc,
                                        error))
     goto out;
 
-  if (!glnx_opendirat (AT_FDCWD, userroot_base, TRUE, &userroot_dfd, error))
+  if (!roc_context_init_core (rocctx, error))
     goto out;
 
   for (i = 0; i < G_N_ELEMENTS (directories); i++)
     {
-      if (!glnx_shutil_mkdir_p_at (userroot_dfd, directories[i], 0755, cancellable, error))
+      if (!glnx_shutil_mkdir_p_at (rocctx->userroot_dfd, directories[i], 0755, cancellable, error))
         goto out;
     }
 
-  { g_autofree char *repo_pathstr = g_strconcat (userroot_base, "repo", NULL);
-    g_autoptr(GFile) repo_path = g_file_new_for_path (repo_pathstr);
-    ostreerepo = ostree_repo_new (repo_path);
-    if (!ostree_repo_create (ostreerepo, OSTREE_REPO_MODE_BARE_USER, cancellable, error))
-      goto out;
-  }
+  if (!ostree_repo_create (rocctx->repo, OSTREE_REPO_MODE_BARE_USER, cancellable, error))
+    goto out;
 
   exit_status = EXIT_SUCCESS;
  out:
@@ -99,17 +178,14 @@ rpmostree_container_builtin_assemble (int             argc,
 {
   int exit_status = EXIT_FAILURE;
   GOptionContext *context = g_option_context_new ("NAME [PKGNAME PKGNAME...]");
-  glnx_unref_object HifContext *hifctx = NULL;
+  g_auto(ROContainerContext) rocctx_data = RO_CONTAINER_CONTEXT_INIT;
+  ROContainerContext *rocctx = &rocctx_data;
   g_auto(RpmOstreeHifInstall) hifinstall = {0,};
-  g_autofree char *userroot_base = get_current_dir_name ();
   const char *name;
   struct stat stbuf;
   const char *const*pkgnames;
   g_autofree char *target_path = NULL;
   const char *target_rootdir;
-  glnx_fd_close int userroot_dfd = -1;
-  glnx_fd_close int rpmmd_dfd = -1;
-  glnx_unref_object OstreeRepo *ostreerepo = NULL;
   
   if (!rpmostree_option_context_parse (context,
                                        assemble_option_entries,
@@ -132,12 +208,12 @@ rpmostree_container_builtin_assemble (int             argc,
   else
     pkgnames = (const char *const*)argv + 2;
 
-  if (!glnx_opendirat (AT_FDCWD, userroot_base, TRUE, &userroot_dfd, error))
+  if (!roc_context_init (rocctx, error))
     goto out;
 
   target_rootdir = glnx_strjoina ("roots/", name);
 
-  if (fstatat (userroot_dfd, target_rootdir, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
+  if (fstatat (rocctx->userroot_dfd, target_rootdir, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
     {
       if (errno != ENOENT)
         {
@@ -152,49 +228,45 @@ rpmostree_container_builtin_assemble (int             argc,
       goto out;
     }
 
-  { g_autofree char *repo_pathstr = g_strconcat (userroot_base, "repo", NULL);
-    g_autoptr(GFile) repo_path = g_file_new_for_path (repo_pathstr);
-    ostreerepo = ostree_repo_new (repo_path);
-    if (!ostree_repo_open (ostreerepo, cancellable, error))
-      goto out;
-  }
-
-  if (!glnx_opendirat (userroot_dfd, "rpm-md", FALSE, &rpmmd_dfd, error))
+  if (!roc_context_prepare_for_root (rocctx, target_rootdir, error))
     goto out;
-  {
-    g_autofree char *abs_instroot = glnx_fdrel_abspath (userroot_dfd, target_rootdir);
-    hifctx = _rpmostree_libhif_new (rpmmd_dfd, abs_instroot, NULL,
-                                    NULL,
-                                    cancellable, error);
-    if (!hifctx)
-      goto out;
-  }
 
   /* --- Downloading metadata --- */
-  if (!_rpmostree_libhif_console_download_metadata (hifctx, cancellable, error))
+  if (!_rpmostree_libhif_console_download_metadata (rocctx->hifctx, cancellable, error))
     goto out;
 
   { const char *const*strviter = pkgnames;
     for (; strviter && *strviter; strviter++)
       {
         const char *pkgname = *strviter;
-        if (!hif_context_install (hifctx, pkgname, error))
+        if (!hif_context_install (rocctx->hifctx, pkgname, error))
           goto out;
       }
   }
 
   /* --- Resolving dependencies --- */
-  if (!_rpmostree_libhif_console_prepare_install (hifctx, ostreerepo, &hifinstall, cancellable, error))
-    goto out;
-
-  /* --- Download and import as necessary --- */
-  if (!_rpmostree_libhif_console_download_import (hifctx, ostreerepo, &hifinstall,
+  if (!_rpmostree_libhif_console_prepare_install (rocctx->hifctx, rocctx->repo, &hifinstall,
                                                   cancellable, error))
     goto out;
 
-  if (!_rpmostree_libhif_console_mkroot (hifctx, ostreerepo, userroot_dfd, target_rootdir, &hifinstall,
-                                         cancellable, error))
+  /* --- Download and import as necessary --- */
+  if (!_rpmostree_libhif_console_download_import (rocctx->hifctx, rocctx->repo, &hifinstall,
+                                                  cancellable, error))
     goto out;
+
+  if (!_rpmostree_libhif_console_mkroot (rocctx->hifctx, rocctx->repo, rocctx->userroot_dfd, target_rootdir,
+                                         &hifinstall, cancellable, error))
+    goto out;
+
+  exit_status = EXIT_SUCCESS;
+ out:
+  return exit_status;
+}
+
+gboolean
+rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancellable, GError **error)
+{
+  int exit_status = EXIT_FAILURE;
 
   exit_status = EXIT_SUCCESS;
  out:

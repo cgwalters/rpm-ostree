@@ -29,7 +29,7 @@ G_BEGIN_DECLS
 gboolean rpmostree_container_builtin_init (int argc, char **argv, GCancellable *cancellable, GError **error);
 gboolean rpmostree_container_builtin_assemble (int argc, char **argv, GCancellable *cancellable, GError **error);
 /* gboolean rpmostree_container_builtin_start (int argc, char **argv, GCancellable *cancellable, GError **error); */
-/* gboolean rpmostree_internals_builtin_upgrade (int argc, char **argv, GCancellable *cancellable, GError **error); */
+gboolean rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancellable, GError **error);
 
 G_END_DECLS
 

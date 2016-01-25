@@ -799,7 +799,7 @@ _rpmostree_libhif_console_download_import (HifContext           *hifctx,
         glnx_unref_object HifState *hifstate = hif_state_new ();
         HifSource *src = key;
         GPtrArray *src_packages = value;
-        g_autofree char *prefix = g_strconcat ("Downloading packages (", hif_source_get_id (src), ")", NULL); 
+        g_autofree char *prefix = g_strconcat ("Downloading from ", hif_source_get_id (src), NULL); 
 
         if (hif_source_is_local (src))
           continue;
