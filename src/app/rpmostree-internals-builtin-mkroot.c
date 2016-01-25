@@ -155,8 +155,9 @@ rpmostree_internals_builtin_mkroot (int             argc,
                                                   cancellable, error))
     goto out;
 
-  if (!_rpmostree_libhif_console_mkroot (hifctx, ostreerepo, AT_FDCWD, rootpath, &hifinstall,
-                                         cancellable, error))
+  if (!_rpmostree_libhif_console_assemble_commit (hifctx, ostreerepo, AT_FDCWD, rootpath, &hifinstall,
+                                                  &commit,
+                                                  cancellable, error))
     goto out;
 
   exit_status = EXIT_SUCCESS;

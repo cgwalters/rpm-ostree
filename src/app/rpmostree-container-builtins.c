@@ -141,7 +141,7 @@ rpmostree_container_builtin_init (int             argc,
   g_auto(ROContainerContext) rocctx_data = RO_CONTAINER_CONTEXT_INIT;
   ROContainerContext *rocctx = &rocctx_data;
   GOptionContext *context = g_option_context_new ("");
-  static const char* const directories[] = { "repo", "rpm-md", "roots" };
+  static const char* const directories[] = { "repo", "rpm-md", "roots", "tmp" };
   guint i;
   
   if (!rpmostree_option_context_parse (context,
@@ -184,7 +184,7 @@ rpmostree_container_builtin_assemble (int             argc,
   const char *name;
   struct stat stbuf;
   const char *const*pkgnames;
-  g_autofree char *target_path = NULL;
+  g_autofree char *commit = NULL;
   const char *target_rootdir;
   
   if (!rpmostree_option_context_parse (context,
@@ -254,9 +254,35 @@ rpmostree_container_builtin_assemble (int             argc,
                                                   cancellable, error))
     goto out;
 
-  if (!_rpmostree_libhif_console_mkroot (rocctx->hifctx, rocctx->repo, rocctx->userroot_dfd, target_rootdir,
-                                         &hifinstall, cancellable, error))
-    goto out;
+  { glnx_fd_close int tmpdir_dfd = -1;
+
+    if (!glnx_opendirat (rocctx->userroot_dfd, "tmp", TRUE, &tmpdir_dfd, error))
+      goto out;
+    
+    if (!_rpmostree_libhif_console_assemble_commit (rocctx->hifctx, tmpdir_dfd,
+                                                    rocctx->repo, name,
+                                                    &hifinstall,
+                                                    &commit,
+                                                    cancellable, error))
+      goto out;
+  }
+
+  g_print ("Checking out %s @ %s...\n", name, commit);
+
+  { OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
+                                       OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
+
+    /* For now... to be crash safe we'd need to duplicate some of the
+     * boot-uuid/fsync gating at a higher level.
+     */
+    opts.disable_fsync = TRUE;
+
+    if (!ostree_repo_checkout_tree_at (rocctx->repo, &opts, rocctx->userroot_dfd, target_rootdir,
+                                       commit, cancellable, error))
+      goto out;
+  }
+
+  g_print ("Checking out %s @ %s...done\n", name, commit);
 
   exit_status = EXIT_SUCCESS;
  out:

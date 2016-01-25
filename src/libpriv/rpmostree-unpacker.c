@@ -917,7 +917,6 @@ rpmostree_unpacker_unpack_to_ostree (RpmOstreeUnpacker *self,
   g_autofree char *default_dir_checksum  = NULL;
   g_autoptr(GFile) root = NULL;
   glnx_unref_object OstreeMutableTree *mtree = NULL;
-  glnx_unref_object OstreeMutableTree *content_root = NULL;
   g_autoptr(GBytes) header_bytes = NULL;
   g_autofree char *commit_checksum = NULL;
   g_auto(GVariantBuilder) metadata_builder;

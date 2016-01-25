@@ -848,6 +848,7 @@ ostree_checkout_package (int           dfd,
                          HifContext   *hifctx,
                          HyPackage     pkg,
                          OstreeRepo   *ostreerepo,
+                         OstreeRepoDevInoCache *devino_cache,
                          const char   *pkg_ostree_commit,
                          GCancellable *cancellable,
                          GError      **error)
@@ -855,6 +856,8 @@ ostree_checkout_package (int           dfd,
   gboolean ret = FALSE;
   OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
                                      OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
+
+  opts.devino_to_csum_cache = devino_cache;
 
   /* For now... to be crash safe we'd need to duplicate some of the
    * boot-uuid/fsync gating at a higher level.
@@ -960,18 +963,19 @@ set_rpm_macro_define (const char *key, const char *value)
 }
 
 gboolean
-_rpmostree_libhif_console_mkroot (HifContext    *hifctx,
-                                  OstreeRepo    *ostreerepo,
-                                  int            dfd,
-                                  const char    *path,
-                                  struct RpmOstreeHifInstall *install,
-                                  GCancellable  *cancellable,
-                                  GError       **error)
+_rpmostree_libhif_console_assemble_commit (HifContext    *hifctx,
+                                           int            tmpdir_dfd,
+                                           OstreeRepo    *ostreerepo,
+                                           const char    *name,
+                                           struct RpmOstreeHifInstall *install,
+                                           char          **out_commit,
+                                           GCancellable  *cancellable,
+                                           GError       **error)
 {
   gboolean ret = FALSE;
   guint progress_sigid;
   TransactionData tdata = { 0, -1 };
-  g_autofree char *root_abspath = glnx_fdrel_abspath (dfd, path);
+  g_autofree char *root_abspath = NULL;
   g_auto(GLnxConsoleRef) console = { 0, };
   glnx_unref_object HifState *hifstate = NULL;
   rpmts ordering_ts = NULL;
@@ -986,6 +990,10 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   glnx_fd_close int rootfs_fd = -1;
   char *tmp_metadata_dir_path = NULL;
   glnx_fd_close int tmp_metadata_dfd = -1;
+  OstreeRepoDevInoCache *devino_cache = NULL;
+  g_autofree char *workdir_path = NULL;
+  g_autofree char *ret_commit_checksum = NULL;
+  const char *workdir_root;
 
   glnx_console_lock (&console);
 
@@ -993,6 +1001,13 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
                           &tmp_metadata_dfd, error))
     goto out;
   tdata.tmp_metadata_dfd = tmp_metadata_dfd;
+
+  workdir_path = g_strdup ("rpmostree-commit-XXXXXX");
+  if (!glnx_mkdtempat (tmpdir_dfd, workdir_path, 0755, error))
+    goto out;
+
+  workdir_root = glnx_strjoina (workdir_path, "root");
+  root_abspath = glnx_fdrel_abspath (tmpdir_dfd, workdir_root);
 
   ordering_ts = rpmtsCreate ();
   rpmtsSetRootDir (ordering_ts, root_abspath);
@@ -1088,13 +1103,15 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
   n_rpmts_elements = (guint)rpmtsNElements (ordering_ts);
   hif_state_set_number_steps (hifstate, n_rpmts_elements);
 
-  if (!ostree_checkout_package (dfd, path, hifctx, filesystem_package, ostreerepo,
+  devino_cache = ostree_repo_devino_cache_new ();
+
+  if (!ostree_checkout_package (tmp_metadata_dfd, workdir_root, hifctx, filesystem_package, ostreerepo, devino_cache,
                                 g_hash_table_lookup (pkg_to_ostree_commit, filesystem_package),
                                 cancellable, error))
     goto out;
   hif_state_assert_done (hifstate);
 
-  if (!glnx_opendirat (dfd, path, FALSE, &rootfs_fd, error))
+  if (!glnx_opendirat (tmpdir_dfd, workdir_path, FALSE, &rootfs_fd, error))
     goto out;
 
   for (i = 0; i < n_rpmts_elements; i++)
@@ -1106,12 +1123,16 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
       if (pkg == filesystem_package)
         continue;
 
-      if (!ostree_checkout_package (rootfs_fd, ".", hifctx, pkg, ostreerepo,
+      if (!ostree_checkout_package (rootfs_fd, ".", hifctx, pkg, ostreerepo, devino_cache,
                                     g_hash_table_lookup (pkg_to_ostree_commit, pkg),
                                     cancellable, error))
         goto out;
       hif_state_assert_done (hifstate);
     }
+
+  glnx_console_unlock (&console);
+
+  g_print ("Writing rpmdb...\n");
 
   if (!glnx_shutil_mkdir_p_at (rootfs_fd, "usr/share/rpm", 0755, cancellable, error))
     goto out;
@@ -1155,16 +1176,63 @@ _rpmostree_libhif_console_mkroot (HifContext    *hifctx,
       goto out;
     }
 
+  g_print ("Writing rpmdb...done\n");
+
   g_signal_handler_disconnect (hifstate, progress_sigid);
 
+  g_print ("Writing OSTree commit...\n");
+
+  if (!ostree_repo_prepare_transaction (ostreerepo, NULL, cancellable, error))
+    goto out;
+
+  { glnx_unref_object OstreeMutableTree *mtree = NULL;
+    g_autoptr(GFile) root = NULL;
+    g_auto(GVariantBuilder) metadata_builder;
+    OstreeRepoCommitModifier *commit_modifier = ostree_repo_commit_modifier_new (OSTREE_REPO_COMMIT_MODIFIER_FLAGS_NONE, NULL, NULL, NULL);
+
+    g_variant_builder_init (&metadata_builder, (GVariantType*)"a{sv}");
+
+    ostree_repo_commit_modifier_set_devino_cache (commit_modifier, devino_cache);
+
+    mtree = ostree_mutable_tree_new ();
+
+    if (!ostree_repo_write_dfd_to_mtree (ostreerepo, rootfs_fd, ".", mtree,
+                                         commit_modifier, cancellable, error))
+      goto out;
+
+    if (!ostree_repo_write_mtree (ostreerepo, mtree, &root, cancellable, error))
+      goto out;
+    
+    if (!ostree_repo_write_commit (ostreerepo, NULL, "", "",
+                                   g_variant_builder_end (&metadata_builder),
+                                   OSTREE_REPO_FILE (root),
+                                   &ret_commit_checksum, cancellable, error))
+      goto out;
+    
+    ostree_repo_transaction_set_ref (ostreerepo, NULL, name, ret_commit_checksum);
+
+    if (!ostree_repo_commit_transaction (ostreerepo, NULL, cancellable, error))
+      goto out;
+
+    /* FIXME memleak on error, need g_autoptr for this */
+    ostree_repo_commit_modifier_unref (commit_modifier);
+  }
+
+  g_print ("Writing OSTree commit...done\n");
+
   ret = TRUE;
+  if (out_commit)
+    *out_commit = g_steal_pointer (&ret_commit_checksum);
  out:
   if (tmp_metadata_dir_path)
     (void) glnx_shutil_rm_rf_at (AT_FDCWD, tmp_metadata_dir_path, cancellable, NULL);
+  if (workdir_path)
+    (void) glnx_shutil_rm_rf_at (tmpdir_dfd, workdir_path, cancellable, NULL);
+  if (devino_cache)
+    ostree_repo_devino_cache_unref (devino_cache);
   if (ordering_ts)
     rpmtsFree (ordering_ts);
   if (rpmdb_ts)
     rpmtsFree (rpmdb_ts);
   return ret;
 }
-
