@@ -1057,7 +1057,7 @@ _rpmostree_libhif_console_assemble_commit (HifContext    *hifctx,
           if (!g_variant_dict_lookup (pkg_meta_dict, "rpmostree.metadata", "@ay", &header_variant))
             {
               g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "Unable to find 'rpmostree.header' key in commit %s of %s",
+                           "Unable to find 'rpmostree.metadata' key in commit %s of %s",
                            cached_rev, hif_package_get_id (pkg));
               goto out;
             }
