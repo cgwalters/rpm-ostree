@@ -32,7 +32,7 @@ static RpmOstreeContainerCommand container_subcommands[] = {
   { "init", rpmostree_container_builtin_init },
   { "assemble", rpmostree_container_builtin_assemble },
   /* { "start", rpmostree_container_builtin_start }, */
-  /* { "upgrade", rpmostree_container_builtin_upgrade }, */
+  { "upgrade", rpmostree_container_builtin_upgrade },
   { NULL, NULL }
 };
 

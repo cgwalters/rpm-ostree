@@ -51,6 +51,7 @@ typedef struct {
   char *userroot_base;
   int userroot_dfd;
 
+  int roots_dfd;
   OstreeRepo *repo;
   HifContext *hifctx;
 
@@ -88,6 +89,9 @@ roc_context_init (ROContainerContext *rocctx,
   if (!roc_context_init_core (rocctx, error))
     goto out;
 
+  if (!glnx_opendirat (rocctx->userroot_dfd, "roots", TRUE, &rocctx->roots_dfd, error))
+    goto out;
+
   if (!ostree_repo_open (rocctx->repo, NULL, error))
     goto out;
 
@@ -105,7 +109,7 @@ roc_context_prepare_for_root (ROContainerContext *rocctx,
                               GError            **error)
 {
   gboolean ret = FALSE;
-  g_autofree char *abs_instroot = glnx_fdrel_abspath (rocctx->userroot_dfd, target);
+  g_autofree char *abs_instroot = glnx_fdrel_abspath (rocctx->roots_dfd, target);
 
   rocctx->hifctx = _rpmostree_libhif_new (rocctx->rpmmd_dfd, abs_instroot, NULL,
                                           NULL, NULL, error);
@@ -124,6 +128,8 @@ roc_context_deinit (ROContainerContext *rocctx)
   if (rocctx->userroot_dfd)
     (void) close (rocctx->userroot_dfd);
   g_clear_object (&rocctx->repo);
+  if (rocctx->roots_dfd)
+    (void) close (rocctx->roots_dfd);
   if (rocctx->rpmmd_dfd)
     (void) close (rocctx->rpmmd_dfd);
   g_clear_object (&rocctx->hifctx);
@@ -168,6 +174,53 @@ rpmostree_container_builtin_init (int             argc,
   exit_status = EXIT_SUCCESS;
  out:
   return exit_status;
+}
+
+/*
+ * Like symlinkat() but overwrites (atomically) an existing
+ * symlink.
+ */
+static gboolean
+symlink_at_replace (const char    *oldpath,
+                    int            parent_dfd,
+                    const char    *newpath,
+                    GCancellable  *cancellable,
+                    GError       **error)
+{
+  gboolean ret = FALSE;
+  int res;
+  /* Possibly in the future generate a temporary random name here,
+   * would need to move "generate a temporary name" code into
+   * libglnx or glib?
+   */
+  char *temppath = glnx_strjoina (newpath, ".tmp");
+
+  /* Clean up any stale temporary links */ 
+  (void) unlinkat (parent_dfd, temppath, 0);
+
+  /* Create the temp link */ 
+  do
+    res = symlinkat (oldpath, parent_dfd, temppath);
+  while (G_UNLIKELY (res == -1 && errno == EINTR));
+  if (res == -1)
+    {
+      glnx_set_error_from_errno (error);
+      goto out;
+    }
+
+  /* Rename it into place */ 
+  do
+    res = renameat (parent_dfd, temppath, parent_dfd, newpath);
+  while (G_UNLIKELY (res == -1 && errno == EINTR));
+  if (res == -1)
+    {
+      glnx_set_error_from_errno (error);
+      goto out;
+    }
+
+  ret = TRUE;
+ out:
+  return ret;
 }
 
 int
@@ -219,9 +272,9 @@ rpmostree_container_builtin_assemble (int             argc,
   if (!roc_context_init (rocctx, error))
     goto out;
 
-  target_rootdir = glnx_strjoina ("roots/", name);
+  target_rootdir = glnx_strjoina (name, ".0");
 
-  if (fstatat (rocctx->userroot_dfd, target_rootdir, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
+  if (fstatat (rocctx->roots_dfd, target_rootdir, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
     {
       if (errno != ENOENT)
         {
@@ -276,31 +329,94 @@ rpmostree_container_builtin_assemble (int             argc,
      */
     opts.disable_fsync = TRUE;
 
-    if (!ostree_repo_checkout_tree_at (rocctx->repo, &opts, rocctx->userroot_dfd, target_rootdir,
+    if (!ostree_repo_checkout_tree_at (rocctx->repo, &opts, rocctx->roots_dfd, target_rootdir,
                                        commit, cancellable, error))
       goto out;
   }
 
   g_print ("Checking out %s @ %s...done\n", name, commit);
 
+  if (!symlink_at_replace (target_rootdir, rocctx->roots_dfd, name,
+                           cancellable, error))
+    goto out;
+
+  g_print ("Creating current symlink...done\n");
+
   exit_status = EXIT_SUCCESS;
  out:
   return exit_status;
+}
+
+#define APP_VERSION_REGEXP ".+\\.([01])"
+
+static gboolean
+parse_app_version (const char *name,
+                   guint      *out_version,
+                   GError    **error)
+{
+  gboolean ret = FALSE;
+  GMatchInfo *match = NULL;
+  static gsize regex_initialized;
+  static GRegex *regex;
+  int ret_version;
+
+  if (g_once_init_enter (&regex_initialized))
+    {
+      regex = g_regex_new (APP_VERSION_REGEXP, 0, 0, NULL);
+      g_assert (regex);
+      g_once_init_leave (&regex_initialized, 1);
+    }
+
+  if (!g_regex_match (regex, name, 0, &match))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Invalid app link %s", name);
+      goto out;
+    }
+
+  { g_autofree char *version_str = g_match_info_fetch (match, 1);
+    ret_version = g_ascii_strtoull (version_str, NULL, 10);
+    
+    switch (ret_version)
+      {
+      case 0:
+      case 1:
+        break;
+      default:
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "Invalid version in app link %s", name);
+        goto out;
+      }
+  }
+
+  ret = TRUE;
+  *out_version = ret_version;
+ out:
+  return ret;
 }
 
 gboolean
 rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancellable, GError **error)
 {
   int exit_status = EXIT_FAILURE;
-  GOptionContext *context = g_option_context_new ("NAME [PKGNAME PKGNAME...]");
+  GOptionContext *context = g_option_context_new ("NAME");
   g_auto(ROContainerContext) rocctx_data = RO_CONTAINER_CONTEXT_INIT;
   ROContainerContext *rocctx = &rocctx_data;
   g_auto(RpmOstreeHifInstall) hifinstall = {0,};
   const char *name;
-  struct stat stbuf;
   const char *const*pkgnames;
-  g_autofree char *commit = NULL;
-  const char *target_rootdir;
+  g_autofree char *commit_checksum = NULL;
+  g_autofree char *new_commit_checksum = NULL;
+  g_autoptr(GVariant) commit = NULL;
+  g_autoptr(GVariant) metadata = NULL;
+  g_autoptr(GVariant) input_packages_v = NULL;
+  g_autoptr(GVariant) input_goal_sha512_v = NULL;
+  guint current_version;
+  guint new_version;
+  g_autofree char *previous_goal_sha512 = NULL;
+  const char *target_current_root;
+  const char *target_new_root;
+  const char *zeroone = "0\01\0";
   
   if (!rpmostree_option_context_parse (context,
                                        assemble_option_entries,
@@ -318,44 +434,77 @@ rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancel
     }
 
   name = argv[1];
-  if (argc == 2)
-    pkgnames = (const char *const*)argv + 1;
-  else
-    pkgnames = (const char *const*)argv + 2;
 
   if (!roc_context_init (rocctx, error))
     goto out;
 
-  target_rootdir = glnx_strjoina ("roots/", name);
-
-  if (fstatat (rocctx->userroot_dfd, target_rootdir, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
+  target_current_root = glnx_readlinkat_malloc (rocctx->roots_dfd, name, cancellable, error);
+  if (!target_current_root)
     {
-      if (errno != ENOENT)
-        {
-          glnx_set_error_from_errno (error);
-          goto out;
-        }
-    }
-  else
-    {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                   "Tree %s already exists", target_rootdir);
+      g_prefix_error (error, "Reading app link %s", name);
       goto out;
     }
 
-  if (!roc_context_prepare_for_root (rocctx, target_rootdir, error))
+  if (!parse_app_version (target_current_root, &current_version, error))
+    goto out;
+
+  new_version = current_version == 0 ? 1 : 0;
+  /* Yeah, I'm being mildly clever here indexing into the constant
+   * array which is a pointless micro-optimization avoiding
+   * g_strdup_printf().
+   */
+  target_new_root = glnx_strjoina (name, ".", zeroone + (new_version * 2));
+
+  if (!roc_context_prepare_for_root (rocctx, name, error))
     goto out;
 
   /* --- Downloading metadata --- */
   if (!_rpmostree_libhif_console_download_metadata (rocctx->hifctx, cancellable, error))
     goto out;
 
+  { g_autoptr(GVariantDict) metadata_dict = NULL;
+
+    if (!ostree_repo_resolve_rev (rocctx->repo, name, FALSE, &commit_checksum, error))
+      goto out;
+
+    if (!ostree_repo_load_variant (rocctx->repo, OSTREE_OBJECT_TYPE_COMMIT, commit_checksum,
+                                   &commit, error))
+      goto out;
+
+    metadata = g_variant_get_child_value (commit, 0);
+    metadata_dict = g_variant_dict_new (metadata);
+
+    input_packages_v = _rpmostree_vardict_lookup_value_required (metadata_dict, "rpmostree.input-packages",
+                                                                 (GVariantType*)"as", error);
+    if (!input_packages_v)
+      goto out;
+
+    pkgnames = g_variant_get_strv (input_packages_v, NULL);
+
+    input_goal_sha512_v = _rpmostree_vardict_lookup_value_required (metadata_dict, "rpmostree.nevras-sha512",
+                                                                    (GVariantType*)"s", error);
+    if (!input_goal_sha512_v)
+      goto out;
+
+    previous_goal_sha512 = g_variant_dup_string (input_goal_sha512_v, NULL);
+  }
+      
   /* --- Resolving dependencies --- */
   if (!_rpmostree_libhif_console_prepare_install (rocctx->hifctx, rocctx->repo,
                                                   pkgnames,
                                                   &hifinstall,
                                                   cancellable, error))
     goto out;
+
+  { g_autofree char *new_goal_sha512 = _rpmostree_hif_checksum_goal_sha512 (hif_context_get_goal (rocctx->hifctx));
+
+    if (strcmp (new_goal_sha512, previous_goal_sha512) == 0)
+      {
+        g_print ("No changes in inputs to %s (%s)\n", name, commit_checksum);
+        exit_status = EXIT_SUCCESS;
+        goto out;
+      }
+  }
 
   /* --- Download and import as necessary --- */
   if (!_rpmostree_libhif_console_download_import (rocctx->hifctx, rocctx->repo, &hifinstall,
@@ -370,12 +519,12 @@ rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancel
     if (!_rpmostree_libhif_console_assemble_commit (rocctx->hifctx, tmpdir_dfd,
                                                     rocctx->repo, name,
                                                     &hifinstall,
-                                                    &commit,
+                                                    &new_commit_checksum,
                                                     cancellable, error))
       goto out;
   }
 
-  g_print ("Checking out %s @ %s...\n", name, commit);
+  g_print ("Checking out %s @ %s...\n", name, new_commit_checksum);
 
   { OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
                                        OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
@@ -385,12 +534,18 @@ rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancel
      */
     opts.disable_fsync = TRUE;
 
-    if (!ostree_repo_checkout_tree_at (rocctx->repo, &opts, rocctx->userroot_dfd, target_rootdir,
-                                       commit, cancellable, error))
+    if (!ostree_repo_checkout_tree_at (rocctx->repo, &opts, rocctx->roots_dfd, target_new_root,
+                                       new_commit_checksum, cancellable, error))
       goto out;
   }
 
-  g_print ("Checking out %s @ %s...done\n", name, commit);
+  g_print ("Checking out %s @ %s...done\n", name, new_commit_checksum);
+
+  if (!symlink_at_replace (target_new_root, rocctx->roots_dfd, name,
+                           cancellable, error))
+    goto out;
+
+  g_print ("Creating current symlink...done\n");
 
   exit_status = EXIT_SUCCESS;
  out:

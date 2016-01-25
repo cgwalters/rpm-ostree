@@ -543,6 +543,14 @@ _rpmostree_hif_checksum_goal (GChecksum *checksum,
     }
 }
 
+char *
+_rpmostree_hif_checksum_goal_sha512 (HyGoal goal)
+{
+  g_autoptr(GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA512);
+  _rpmostree_hif_checksum_goal (checksum, goal);
+  return g_strdup (g_checksum_get_string (checksum));
+}
+
 /**
  * hif_source_checksum_hy_to_lr:
  **/

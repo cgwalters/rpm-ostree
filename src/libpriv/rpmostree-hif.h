@@ -71,6 +71,7 @@ void _rpmostree_libhif_repos_disable_all (HifContext    *context);
 void _rpmostree_libhif_set_ostree_repo (HifContext *context);
 
 void _rpmostree_hif_checksum_goal (GChecksum *checksum, HyGoal goal);
+char * _rpmostree_hif_checksum_goal_sha512 (HyGoal goal);
 
 char *_rpmostree_get_cache_branch_header (Header hdr);
 char *_rpmostree_get_cache_branch_pkg (HyPackage pkg);
