@@ -388,11 +388,23 @@ get_packages_to_download (HifContext  *hifctx,
 gboolean
 _rpmostree_libhif_console_prepare_install (HifContext           *hifctx,
                                            OstreeRepo           *ostreerepo,
+                                           const char *const    *pkgnames,
                                            RpmOstreeHifInstall  *out_install,
                                            GCancellable         *cancellable,
                                            GError              **error)
 {
   gboolean ret = FALSE;
+
+  out_install->packages_requested = g_ptr_array_new_with_free_func (g_free);
+  { const char *const*strviter = pkgnames;
+    for (; strviter && *strviter; strviter++)
+      {
+        const char *pkgname = *strviter;
+        if (!hif_context_install (hifctx, pkgname, error))
+          goto out;
+        g_ptr_array_add (out_install->packages_requested, g_strdup (pkgname));
+      }
+  }
 
   printf ("%s", "Resolving dependencies: ");
   fflush (stdout);
@@ -1054,11 +1066,11 @@ _rpmostree_libhif_console_assemble_commit (HifContext    *hifctx,
         { g_autoptr(GVariant) pkg_meta = g_variant_get_child_value (pkg_commit, 0);
           g_autoptr(GVariantDict) pkg_meta_dict = g_variant_dict_new (pkg_meta);
 
-          if (!g_variant_dict_lookup (pkg_meta_dict, "rpmostree.metadata", "@ay", &header_variant))
+          header_variant = _rpmostree_vardict_lookup_value_required (pkg_meta_dict, "rpmostree.metadata",
+                                                                     (GVariantType*)"ay", error);
+          if (!header_variant)
             {
-              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "Unable to find 'rpmostree.metadata' key in commit %s of %s",
-                           cached_rev, hif_package_get_id (pkg));
+              g_prefix_error (error, "In commit %s of %s: ", cached_rev, hif_package_get_id (pkg));
               goto out;
             }
 
@@ -1188,9 +1200,18 @@ _rpmostree_libhif_console_assemble_commit (HifContext    *hifctx,
   { glnx_unref_object OstreeMutableTree *mtree = NULL;
     g_autoptr(GFile) root = NULL;
     g_auto(GVariantBuilder) metadata_builder;
+    g_autoptr(GChecksum) goal_checksum = g_checksum_new (G_CHECKSUM_SHA512);
     OstreeRepoCommitModifier *commit_modifier = ostree_repo_commit_modifier_new (OSTREE_REPO_COMMIT_MODIFIER_FLAGS_NONE, NULL, NULL, NULL);
 
     g_variant_builder_init (&metadata_builder, (GVariantType*)"a{sv}");
+
+    g_variant_builder_add (&metadata_builder, "{sv}",
+                           "rpmostree.input-packages", g_variant_new_strv ((const char *const*)install->packages_requested->pdata,
+                                                                           install->packages_requested->len));
+
+    _rpmostree_hif_checksum_goal (goal_checksum, hif_context_get_goal (hifctx));
+    g_variant_builder_add (&metadata_builder, "{sv}",
+                           "rpmostree.nevras-sha512", g_variant_new_string (g_checksum_get_string (goal_checksum)));
 
     ostree_repo_commit_modifier_set_devino_cache (commit_modifier, devino_cache);
 

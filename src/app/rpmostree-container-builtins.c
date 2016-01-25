@@ -183,6 +183,121 @@ rpmostree_container_builtin_assemble (int             argc,
   g_auto(RpmOstreeHifInstall) hifinstall = {0,};
   const char *name;
   struct stat stbuf;
+  g_autofree char**pkgnames = NULL;
+  g_autofree char *commit = NULL;
+  const char *target_rootdir;
+  
+  if (!rpmostree_option_context_parse (context,
+                                       assemble_option_entries,
+                                       &argc, &argv,
+                                       RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD,
+                                       cancellable,
+                                       NULL,
+                                       error))
+    goto out;
+
+  if (argc < 1)
+    {
+      rpmostree_usage_error (context, "NAME must be specified", error);
+      goto out;
+    }
+
+  name = argv[1];
+  { g_autoptr(GPtrArray) pkgnamesv = g_ptr_array_new_with_free_func (NULL);
+    if (argc == 2)
+      g_ptr_array_add (pkgnamesv, argv[1]);
+    else
+      {
+        guint i;
+        for (i = 2; i < argc; i++)
+          g_ptr_array_add (pkgnamesv, argv[i]);
+      }
+    g_ptr_array_add (pkgnamesv, NULL);
+    pkgnames = (char**)g_ptr_array_free (pkgnamesv, FALSE);
+  }
+
+  if (!roc_context_init (rocctx, error))
+    goto out;
+
+  target_rootdir = glnx_strjoina ("roots/", name);
+
+  if (fstatat (rocctx->userroot_dfd, target_rootdir, &stbuf, AT_SYMLINK_NOFOLLOW) < 0)
+    {
+      if (errno != ENOENT)
+        {
+          glnx_set_error_from_errno (error);
+          goto out;
+        }
+    }
+  else
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "Tree %s already exists", target_rootdir);
+      goto out;
+    }
+
+  if (!roc_context_prepare_for_root (rocctx, target_rootdir, error))
+    goto out;
+
+  /* --- Downloading metadata --- */
+  if (!_rpmostree_libhif_console_download_metadata (rocctx->hifctx, cancellable, error))
+    goto out;
+
+  /* --- Resolving dependencies --- */
+  if (!_rpmostree_libhif_console_prepare_install (rocctx->hifctx, rocctx->repo, (const char*const*)pkgnames,
+                                                  &hifinstall, cancellable, error))
+    goto out;
+
+  /* --- Download and import as necessary --- */
+  if (!_rpmostree_libhif_console_download_import (rocctx->hifctx, rocctx->repo, &hifinstall,
+                                                  cancellable, error))
+    goto out;
+
+  { glnx_fd_close int tmpdir_dfd = -1;
+
+    if (!glnx_opendirat (rocctx->userroot_dfd, "tmp", TRUE, &tmpdir_dfd, error))
+      goto out;
+    
+    if (!_rpmostree_libhif_console_assemble_commit (rocctx->hifctx, tmpdir_dfd,
+                                                    rocctx->repo, name,
+                                                    &hifinstall,
+                                                    &commit,
+                                                    cancellable, error))
+      goto out;
+  }
+
+  g_print ("Checking out %s @ %s...\n", name, commit);
+
+  { OstreeRepoCheckoutOptions opts = { OSTREE_REPO_CHECKOUT_MODE_USER,
+                                       OSTREE_REPO_CHECKOUT_OVERWRITE_UNION_FILES, };
+
+    /* For now... to be crash safe we'd need to duplicate some of the
+     * boot-uuid/fsync gating at a higher level.
+     */
+    opts.disable_fsync = TRUE;
+
+    if (!ostree_repo_checkout_tree_at (rocctx->repo, &opts, rocctx->userroot_dfd, target_rootdir,
+                                       commit, cancellable, error))
+      goto out;
+  }
+
+  g_print ("Checking out %s @ %s...done\n", name, commit);
+
+  exit_status = EXIT_SUCCESS;
+ out:
+  return exit_status;
+}
+
+gboolean
+rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancellable, GError **error)
+{
+  int exit_status = EXIT_FAILURE;
+  GOptionContext *context = g_option_context_new ("NAME [PKGNAME PKGNAME...]");
+  g_auto(ROContainerContext) rocctx_data = RO_CONTAINER_CONTEXT_INIT;
+  ROContainerContext *rocctx = &rocctx_data;
+  g_auto(RpmOstreeHifInstall) hifinstall = {0,};
+  const char *name;
+  struct stat stbuf;
   const char *const*pkgnames;
   g_autofree char *commit = NULL;
   const char *target_rootdir;
@@ -235,17 +350,10 @@ rpmostree_container_builtin_assemble (int             argc,
   if (!_rpmostree_libhif_console_download_metadata (rocctx->hifctx, cancellable, error))
     goto out;
 
-  { const char *const*strviter = pkgnames;
-    for (; strviter && *strviter; strviter++)
-      {
-        const char *pkgname = *strviter;
-        if (!hif_context_install (rocctx->hifctx, pkgname, error))
-          goto out;
-      }
-  }
-
   /* --- Resolving dependencies --- */
-  if (!_rpmostree_libhif_console_prepare_install (rocctx->hifctx, rocctx->repo, &hifinstall,
+  if (!_rpmostree_libhif_console_prepare_install (rocctx->hifctx, rocctx->repo,
+                                                  pkgnames,
+                                                  &hifinstall,
                                                   cancellable, error))
     goto out;
 
@@ -283,16 +391,6 @@ rpmostree_container_builtin_assemble (int             argc,
   }
 
   g_print ("Checking out %s @ %s...done\n", name, commit);
-
-  exit_status = EXIT_SUCCESS;
- out:
-  return exit_status;
-}
-
-gboolean
-rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancellable, GError **error)
-{
-  int exit_status = EXIT_FAILURE;
 
   exit_status = EXIT_SUCCESS;
  out:

@@ -150,7 +150,6 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
 {
   gboolean ret = FALSE;
   guint progress_sigid;
-  char **strviter;
   GFile *contextdir = self->treefile_context_dirs->pdata[0];
   g_auto(RpmOstreeHifInstall) hifinstall = { 0, };
   gs_unref_object HifContext *hifctx = NULL;
@@ -250,13 +249,8 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
   if (!_rpmostree_libhif_console_download_metadata (hifctx, cancellable, error))
     goto out;
 
-  for (strviter = packages; strviter && *strviter; strviter++)
-    {
-      if (!hif_context_install (hifctx, *strviter, error))
-        goto out;
-    }
-
-  if (!_rpmostree_libhif_console_prepare_install (hifctx, NULL, &hifinstall, cancellable, error))
+  if (!_rpmostree_libhif_console_prepare_install (hifctx, NULL, (const char *const*)packages,
+                                                  &hifinstall, cancellable, error))
     goto out;
 
   /* FIXME - just do a depsolve here before we compute download requirements */

@@ -29,6 +29,7 @@
 #include "libglnx.h"
 
 struct RpmOstreeHifInstall {
+  GPtrArray *packages_requested;
   /* Target state */
   GPtrArray *packages_to_download;
   guint64 n_bytes_to_fetch;
@@ -85,6 +86,7 @@ gboolean _rpmostree_libhif_console_download_metadata (HifContext     *context,
 /* This API allocates an install context, use with one of the later ones */
 gboolean _rpmostree_libhif_console_prepare_install (HifContext     *context,
                                                     OstreeRepo     *repo,
+                                                    const char *const *packages,
                                                     struct RpmOstreeHifInstall *out_install,
                                                     GCancellable   *cancellable,
                                                     GError        **error);
@@ -113,6 +115,7 @@ gboolean _rpmostree_libhif_console_assemble_commit (HifContext                 *
 static inline void
 _rpmostree_hif_install_cleanup (struct RpmOstreeHifInstall *hifinst)
 {
+  g_clear_pointer (&hifinst->packages_requested, g_ptr_array_unref);
   g_clear_pointer (&hifinst->packages_to_download, g_ptr_array_unref);
 }
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(RpmOstreeHifInstall, _rpmostree_hif_install_cleanup)
