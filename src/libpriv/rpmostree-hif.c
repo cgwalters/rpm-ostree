@@ -96,22 +96,24 @@ _rpmostree_libhif_new (int rpmmd_cache_dfd,
 
   _rpmostree_libhif_set_cache_dfd (hifctx, rpmmd_cache_dfd);
   if (repos_dir)
-    {
-      hif_context_set_repo_dir (hifctx, repos_dir);
-      _rpmostree_libhif_repos_disable_all (hifctx);
-    }
+    hif_context_set_repo_dir (hifctx, repos_dir);
 
   if (!_rpmostree_libhif_setup (hifctx, cancellable, error))
     goto out;
 
-  { const char * const *strviter = enabled_repos;
-    for (; strviter && *strviter; strviter++)
-      {
-        const char *reponame = *strviter;
-        if (!_rpmostree_libhif_repos_enable_by_name (hifctx, reponame, error))
-          goto out;
+  if (enabled_repos)
+    {
+      _rpmostree_libhif_repos_disable_all (hifctx);
+      
+      { const char * const *strviter = enabled_repos;
+        for (; strviter && *strviter; strviter++)
+          {
+            const char *reponame = *strviter;
+            if (!_rpmostree_libhif_repos_enable_by_name (hifctx, reponame, error))
+              goto out;
+          }
       }
-  }
+    }
 
   ret = TRUE;
  out:
@@ -1125,7 +1127,7 @@ _rpmostree_libhif_console_assemble_commit (HifContext    *hifctx,
 
   devino_cache = ostree_repo_devino_cache_new ();
 
-  if (!ostree_checkout_package (tmp_metadata_dfd, workdir_root, hifctx, filesystem_package, ostreerepo, devino_cache,
+  if (!ostree_checkout_package (tmpdir_dfd, workdir_path, hifctx, filesystem_package, ostreerepo, devino_cache,
                                 g_hash_table_lookup (pkg_to_ostree_commit, filesystem_package),
                                 cancellable, error))
     goto out;

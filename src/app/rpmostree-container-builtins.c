@@ -95,7 +95,7 @@ roc_context_init (ROContainerContext *rocctx,
   if (!ostree_repo_open (rocctx->repo, NULL, error))
     goto out;
 
-  if (!glnx_opendirat (rocctx->userroot_dfd, "rpm-md", FALSE, &rocctx->rpmmd_dfd, error))
+  if (!glnx_opendirat (rocctx->userroot_dfd, "cache/rpm-md", FALSE, &rocctx->rpmmd_dfd, error))
     goto out;
 
   ret = TRUE;
@@ -110,8 +110,33 @@ roc_context_prepare_for_root (ROContainerContext *rocctx,
 {
   gboolean ret = FALSE;
   g_autofree char *abs_instroot = glnx_fdrel_abspath (rocctx->roots_dfd, target);
+  g_auto(GLnxDirFdIterator) dfd_iter = { 0, };
+  gboolean have_a_repo_file = FALSE;
+  g_autofree char *reposdir = NULL;
 
-  rocctx->hifctx = _rpmostree_libhif_new (rocctx->rpmmd_dfd, abs_instroot, NULL,
+  /* Automagically use rpmmd.repos.d only if there's a .repo file in it */
+  if (!glnx_dirfd_iterator_init_at (rocctx->userroot_dfd, "rpmmd.repos.d", TRUE, &dfd_iter, error))
+    goto out;
+  while (TRUE)
+    {
+      struct dirent *dent;
+
+      if (!glnx_dirfd_iterator_next_dent (&dfd_iter, &dent, NULL, error))
+        goto out;
+      if (!dent)
+        break;
+
+      if (g_str_has_suffix (dent->d_name, ".repo"))
+        {
+          have_a_repo_file = TRUE;
+          break;
+        }
+    }
+
+  if (have_a_repo_file)
+    reposdir = glnx_fdrel_abspath (rocctx->userroot_dfd, "rpmmd.repos.d");
+
+  rocctx->hifctx = _rpmostree_libhif_new (rocctx->rpmmd_dfd, abs_instroot, reposdir,
                                           NULL, NULL, error);
   if (!rocctx->hifctx)
     goto out;
@@ -147,7 +172,7 @@ rpmostree_container_builtin_init (int             argc,
   g_auto(ROContainerContext) rocctx_data = RO_CONTAINER_CONTEXT_INIT;
   ROContainerContext *rocctx = &rocctx_data;
   GOptionContext *context = g_option_context_new ("");
-  static const char* const directories[] = { "repo", "rpm-md", "roots", "tmp" };
+  static const char* const directories[] = { "repo", "rpmmd.repos.d", "cache/rpm-md", "roots", "tmp" };
   guint i;
   
   if (!rpmostree_option_context_parse (context,
@@ -416,7 +441,6 @@ rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancel
   g_autofree char *previous_goal_sha512 = NULL;
   const char *target_current_root;
   const char *target_new_root;
-  const char *zeroone = "0\01\0";
   
   if (!rpmostree_option_context_parse (context,
                                        assemble_option_entries,
@@ -441,7 +465,7 @@ rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancel
   target_current_root = glnx_readlinkat_malloc (rocctx->roots_dfd, name, cancellable, error);
   if (!target_current_root)
     {
-      g_prefix_error (error, "Reading app link %s", name);
+      g_prefix_error (error, "Reading app link %s: ", name);
       goto out;
     }
 
@@ -453,7 +477,10 @@ rpmostree_container_builtin_upgrade (int argc, char **argv, GCancellable *cancel
    * array which is a pointless micro-optimization avoiding
    * g_strdup_printf().
    */
-  target_new_root = glnx_strjoina (name, ".", zeroone + (new_version * 2));
+  if (new_version == 0)
+    target_new_root = glnx_strjoina (name, ".0");
+  else
+    target_new_root = glnx_strjoina (name, ".1");
 
   if (!roc_context_prepare_for_root (rocctx, name, error))
     goto out;

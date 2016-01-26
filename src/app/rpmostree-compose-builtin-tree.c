@@ -284,8 +284,6 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
         g_print ("Previous commit found, but without rpmostree.inputhash metadata key\n");
     }
 
-  rpmostree_print_transaction (hifctx);
-
   { glnx_fd_close int cachedir_dfd = -1;
     
     if (!glnx_opendirat (self->workdir_dfd, "cache",
