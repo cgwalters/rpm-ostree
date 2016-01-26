@@ -1109,7 +1109,7 @@ _rpmostree_libhif_console_assemble_commit (HifContext    *hifctx,
   hifstate = hif_state_new ();
   progress_sigid = g_signal_connect (hifstate, "percentage-changed",
                                      G_CALLBACK (on_hifstate_percentage_changed), 
-                                     "Unpacking: ");
+                                     "Unpacking:");
 
   /* Okay so what's going on in Fedora with incestuous relationship
    * between the `filesystem`, `setup`, `libgcc` RPMs is actively
