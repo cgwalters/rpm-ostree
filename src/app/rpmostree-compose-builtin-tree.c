@@ -284,16 +284,9 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
         g_print ("Previous commit found, but without rpmostree.inputhash metadata key\n");
     }
 
-  { glnx_fd_close int cachedir_dfd = -1;
-    
-    if (!glnx_opendirat (self->workdir_dfd, "cache",
-                         TRUE, &cachedir_dfd, error))
-      goto out;
-
-    /* --- Downloading packages --- */
-    if (!_rpmostree_libhif_console_download_rpms (hifctx, cachedir_dfd, &hifinstall, cancellable, error))
-      goto out;
-  }
+  /* --- Downloading packages --- */
+  if (!_rpmostree_libhif_console_download_rpms (hifctx, -1, &hifinstall, cancellable, error))
+    goto out;
   
   { g_auto(GLnxConsoleRef) console = { 0, };
     gs_unref_object HifState *hifstate = hif_state_new ();
