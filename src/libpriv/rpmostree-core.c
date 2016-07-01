@@ -2142,6 +2142,7 @@ rpmostree_context_assemble_commit (RpmOstreeContext      *self,
     goto out;
 
   { const char *flavor = NULL;
+    const char *const *instlangs = NULL;
 
     g_variant_dict_lookup (self->spec->dict, "flavor", "&s", &flavor);
 
@@ -2157,6 +2158,14 @@ rpmostree_context_assemble_commit (RpmOstreeContext      *self,
         g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                      "Unknown flavor '%s'", flavor);
         goto out;
+      }
+
+    g_variant_dict_lookup (self->spec->dict, "instlangs", "^a&s", &instlangs);
+
+    if (instlangs && *instlangs)
+      {
+        if (!rpmostree_run_script_localedef (tmprootfs_dfd, instlangs, cancellable, error))
+          goto out;
       }
   }
 
