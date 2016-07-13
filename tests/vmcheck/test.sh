@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+dn=$(cd $(dirname $0) && pwd)
+commondir=../common/
+
 # prepare ssh connection
 vagrant ssh-config > ssh-config
 echo "  ControlMaster auto" >> ssh-config

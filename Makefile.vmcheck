@@ -1,0 +1,26 @@
+vmbuild:
+	@if [ -z "$(SKIP_VMBUILD)" ]; then \
+	  vagrant up && \
+	  ( [ -z "$(VMCLEAN)" ] || vagrant ssh -c "rm -rf sync" ) && \
+	  vagrant rsync && \
+	  vagrant ssh -c "cd sync && \
+	                  make install VERSION=$$(git describe)" && \
+	  ( vagrant ssh -c "sudo systemctl reboot" || : ) && \
+	  sleep 2; \
+	fi
+
+vmoverlay:
+	vagrant up && \
+	( [ -z "$(VMCLEAN)" ] || vagrant ssh -c "rm -rf sync" ) && \
+	vagrant rsync && \
+	vagrant ssh -c "cd sync && make ofsinstall" && \
+	vagrant ssh -c "systemctl daemon-reload && \
+	                systemctl restart rpm-ostreed"
+
+vmshell: vmbuild
+	vagrant ssh
+
+# set up test environment to somewhat resemble uninstalled tests
+vmcheck: vmbuild
+	@env VMTESTS=1 tests/vmcheck/test.sh
+
