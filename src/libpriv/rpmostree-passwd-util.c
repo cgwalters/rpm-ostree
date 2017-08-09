@@ -873,6 +873,7 @@ concat_passwd_file (int              rootfs_fd,
 
 static gboolean
 _data_from_json (int              rootfs_dfd,
+                 gboolean         unified_core,
                  GFile           *treefile_dirpath,
                  JsonObject      *treedata,
                  RpmOstreePasswdMigrateKind kind,
@@ -880,6 +881,7 @@ _data_from_json (int              rootfs_dfd,
                  GCancellable    *cancellable,
                  GError         **error)
 {
+  const char *passwd_dir = unified_core ? "usr/lib" : "etc";
   const gboolean passwd = (kind == RPM_OSTREE_PASSWD_MIGRATE_PASSWD);
   const char *json_conf_name = passwd ? "check-passwd" : "check-groups";
   *out_found = FALSE;
@@ -921,7 +923,7 @@ _data_from_json (int              rootfs_dfd,
   *out_found = TRUE;
 
   const char *filebasename = passwd ? "passwd" : "group";
-  const char *target_etc_filename = glnx_strjoina ("etc/", filebasename);
+  const char *target_etc_filename = glnx_strjoina (passwd_dir, "/", filebasename);
   g_autoptr(FILE) dest_stream = open_file_stream_write_at (rootfs_dfd, target_etc_filename, "w", error);
   if (!dest_stream)
     return FALSE;
@@ -937,6 +939,7 @@ _data_from_json (int              rootfs_dfd,
 gboolean
 rpmostree_generate_passwd_from_previous (OstreeRepo      *repo,
                                          int              rootfs_dfd,
+                                         gboolean         unified_core,
                                          GFile           *treefile_dirpath,
                                          GFile           *previous_root,
                                          JsonObject      *treedata,
@@ -946,16 +949,18 @@ rpmostree_generate_passwd_from_previous (OstreeRepo      *repo,
   gboolean found_passwd_data = FALSE;
   gboolean found_groups_data = FALSE;
   gboolean perform_migrate = FALSE;
+  const char *passwd_dir =
+    unified_core ? "usr/lib" : "etc";
 
-  /* Create /etc in the target root; FIXME - should ensure we're using
+  /* Create the dir in the target root; FIXME - should ensure we're using
    * the right permissions from the filesystem RPM.  Doing this right
    * is really hard because filesystem depends on setup which installs
    * the files...
    */
-  if (!glnx_ensure_dir (rootfs_dfd, "etc", 0755, error))
+  if (!glnx_ensure_dir (rootfs_dfd, passwd_dir, 0755, error))
     return FALSE;
 
-  if (!_data_from_json (rootfs_dfd, treefile_dirpath,
+  if (!_data_from_json (rootfs_dfd, unified_core, treefile_dirpath,
                         treedata, RPM_OSTREE_PASSWD_MIGRATE_PASSWD,
                         &found_passwd_data, cancellable, error))
     return FALSE;
@@ -969,7 +974,7 @@ rpmostree_generate_passwd_from_previous (OstreeRepo      *repo,
                                               cancellable, error))
     return FALSE;
 
-  if (!_data_from_json (rootfs_dfd, treefile_dirpath,
+  if (!_data_from_json (rootfs_dfd, unified_core, treefile_dirpath,
                         treedata, RPM_OSTREE_PASSWD_MIGRATE_GROUP,
                         &found_groups_data, cancellable, error))
     return FALSE;
@@ -1083,15 +1088,18 @@ rpmostree_passwd_prepare_rpm_layering (int                rootfs_dfd,
         return FALSE;
 
       /* Copy the merge's passwd/group to usr/lib (breaking hardlinks) */
-      if (!glnx_file_copy_at (AT_FDCWD,
-                              glnx_strjoina (merge_passwd_dir, "/", file), NULL,
-                              rootfs_dfd, usrlibfiletmp,
-                              GLNX_FILE_COPY_OVERWRITE | GLNX_FILE_COPY_NOXATTRS,
-                              cancellable, error))
-        return FALSE;
+      if (merge_passwd_dir)
+        {
+          if (!glnx_file_copy_at (AT_FDCWD,
+                                  glnx_strjoina (merge_passwd_dir, "/", file), NULL,
+                                  rootfs_dfd, usrlibfiletmp,
+                                  GLNX_FILE_COPY_OVERWRITE | GLNX_FILE_COPY_NOXATTRS,
+                                  cancellable, error))
+            return FALSE;
 
-      if (!glnx_renameat (rootfs_dfd, usrlibfiletmp, rootfs_dfd, usrlibfile, error))
-        return FALSE;
+          if (!glnx_renameat (rootfs_dfd, usrlibfiletmp, rootfs_dfd, usrlibfile, error))
+            return FALSE;
+        }
     }
 
   /* And break hardlinks for the shadow files, since we don't have

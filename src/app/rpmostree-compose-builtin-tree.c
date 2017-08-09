@@ -46,6 +46,7 @@
 static char *opt_workdir;
 static gboolean opt_workdir_tmpfs;
 static char *opt_cachedir;
+static gboolean opt_ex_unprivileged;
 static gboolean opt_force_nocache;
 static gboolean opt_cache_only;
 static char *opt_proxy;
@@ -66,6 +67,7 @@ static GOptionEntry option_entries[] = {
   { "output-repodata-dir", 0, 0, G_OPTION_ARG_STRING, &opt_output_repodata_dir, "Save downloaded repodata in DIR", "DIR" },
   { "cachedir", 0, 0, G_OPTION_ARG_STRING, &opt_cachedir, "Cached state", "CACHEDIR" },
   { "force-nocache", 0, 0, G_OPTION_ARG_NONE, &opt_force_nocache, "Always create a new OSTree commit, even if nothing appears to have changed", NULL },
+  { "ex-unprivileged", 0, 0, G_OPTION_ARG_NONE, &opt_ex_unprivileged, "Experimental: Use new unprivileged compose logic", NULL },
   { "cache-only", 0, 0, G_OPTION_ARG_NONE, &opt_cache_only, "Assume cache is present, do not attempt to update it", NULL },
   { "repo", 'r', 0, G_OPTION_ARG_STRING, &opt_repo, "Path to OSTree repository", "REPO" },
   { "proxy", 0, 0, G_OPTION_ARG_STRING, &opt_proxy, "HTTP proxy", "PROXY" },
@@ -102,6 +104,8 @@ typedef struct {
   int workdir_dfd;
   int cachedir_dfd;
   OstreeRepo *repo;
+  OstreeRepo *pkgcache_repo;
+  OstreeRepoDevInoCache *devino_cache;
   char *ref;
   char *previous_checksum;
 
@@ -118,11 +122,14 @@ rpm_ostree_tree_compose_context_free (RpmOstreeTreeComposeContext *ctx)
   /* Only close workdir_dfd if it's not owned by the tmpdir */
   if (!ctx->workdir_tmp.initialized && ctx->workdir_dfd != -1)
     (void) close (ctx->workdir_dfd);
-  glnx_tmpdir_clear (&ctx->workdir_tmp);
+  if (!g_getenv ("RPMOSTREE_COMPOSE_PRESERVE_WORKDIR"))
+    glnx_tmpdir_clear (&ctx->workdir_tmp);
   g_clear_object (&ctx->workdir);
   if (ctx->cachedir_dfd != -1)
     (void) close (ctx->cachedir_dfd);
   g_clear_object (&ctx->repo);
+  g_clear_object (&ctx->pkgcache_repo);
+  g_clear_pointer (&ctx->devino_cache, (GDestroyNotify)ostree_repo_devino_cache_unref);
   g_free (ctx->ref);
   g_free (ctx->previous_checksum);
   g_clear_pointer (&ctx->serialized_treefile, (GDestroyNotify)g_bytes_unref);
@@ -407,6 +414,18 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
       return FALSE;
   }
 
+  /* In the unprivileged case, we use a pkg cache ostrepo */
+  if (opt_ex_unprivileged && self->cachedir_dfd != -1)
+    {
+      self->pkgcache_repo = ostree_repo_create_at (self->cachedir_dfd, "pkgcache-repo",
+                                                   OSTREE_REPO_MODE_BARE_USER, NULL,
+                                                   cancellable, error);
+      if (!self->pkgcache_repo)
+        return FALSE;
+      rpmostree_context_set_repos (self->corectx, self->repo, self->pkgcache_repo);
+      self->devino_cache = ostree_repo_devino_cache_new ();
+    }
+
   if (!rpmostree_context_prepare (self->corectx, cancellable, error))
     return FALSE;
 
@@ -468,54 +487,79 @@ install_packages_in_root (RpmOstreeTreeComposeContext  *self,
                                                                error))
     return FALSE;
 
+  /* Use librpm to install the packages; this is the non-"unified core"
+   * path.
+   *
+   * First, do /etc/passwd, since useradd will be invoked via RPM scripts in
+   * a traditional way.
+   */
   if (generate_from_previous)
     {
       if (!rpmostree_generate_passwd_from_previous (self->repo, rootfs_dfd,
+                                                    opt_ex_unprivileged,
                                                     treefile_dirpath,
                                                     self->previous_root, treedata,
                                                     cancellable, error))
         return FALSE;
     }
 
-  /* Before we install packages, drop a file to suppress the kernel.rpm dracut run.
-   * <https://github.com/systemd/systemd/pull/4174> */
-  const char *kernel_installd_path = "usr/lib/kernel/install.d";
-  if (!glnx_shutil_mkdir_p_at (rootfs_dfd, kernel_installd_path, 0755, cancellable, error))
-    return FALSE;
-  const char skip_kernel_install_data[] = "#!/usr/bin/sh\nexit 77\n";
-  const char *kernel_skip_path = glnx_strjoina (kernel_installd_path, "/00-rpmostree-skip.install");
-  if (!glnx_file_replace_contents_with_perms_at (rootfs_dfd, kernel_skip_path,
-                                                 (guint8*)skip_kernel_install_data,
-                                                 strlen (skip_kernel_install_data),
-                                                 0755, 0, 0,
-                                                 GLNX_FILE_REPLACE_NODATASYNC,
+  if (!opt_ex_unprivileged)
+    {
+      g_auto(GLnxConsoleRef) console = { 0, };
+      g_autoptr(DnfState) hifstate = dnf_state_new ();
+
+      /* Before we install packages, drop a file to suppress the kernel.rpm dracut run.
+       * <https://github.com/systemd/systemd/pull/4174> */
+      const char *kernel_installd_path = "usr/lib/kernel/install.d";
+      if (!glnx_shutil_mkdir_p_at (rootfs_dfd, kernel_installd_path, 0755, cancellable, error))
+        return FALSE;
+      const char skip_kernel_install_data[] = "#!/usr/bin/sh\nexit 77\n";
+      const char *kernel_skip_path = glnx_strjoina (kernel_installd_path, "/00-rpmostree-skip.install");
+      if (!glnx_file_replace_contents_with_perms_at (rootfs_dfd, kernel_skip_path,
+                                                     (guint8*)skip_kernel_install_data,
+                                                     strlen (skip_kernel_install_data),
+                                                     0755, 0, 0,
+                                                     GLNX_FILE_REPLACE_NODATASYNC,
+                                                     cancellable, error))
+        return FALSE;
+
+      guint progress_sigid = g_signal_connect (hifstate, "percentage-changed",
+                                               G_CALLBACK (on_hifstate_percentage_changed),
+                                               "Installing packages:");
+
+      glnx_console_lock (&console);
+
+      /* We aren't using a container-per script like in the unified core path;
+       * Let's set up /dev in the target, similar to how mock does it.
+       */
+      if (!libcontainer_prep_dev (rootfs_dfd, error))
+        return FALSE;
+
+      /* Run through the traditional librpm install */
+      if (!dnf_transaction_commit (dnf_context_get_transaction (hifctx),
+                                   dnf_context_get_goal (hifctx),
+                                   hifstate,
+                                   error))
+        return FALSE;
+
+      g_signal_handler_disconnect (hifstate, progress_sigid);
+    }
+  else
+    {
+      /* Experimental "unified core" path:
+       * https://github.com/projectatomic/rpm-ostree/issues/729
+       */
+
+      /* Import all of the rpms into the pkg-cache repo  */
+      if (!rpmostree_context_import (self->corectx, cancellable, error))
+        return FALSE;
+
+      /* Generate the root filesystem, but don't commit; that comes later */
+      if (!rpmostree_context_assemble_tmprootfs (self->corectx, rootfs_dfd,
+                                                 self->devino_cache,
                                                  cancellable, error))
-    return FALSE;
-
-  /* Now actually run through librpm to install the packages.  Note this bit
-   * will be replaced in the future with a unified core:
-   * https://github.com/projectatomic/rpm-ostree/issues/729
-   */
-  { g_auto(GLnxConsoleRef) console = { 0, };
-    g_autoptr(DnfState) hifstate = dnf_state_new ();
-
-    guint progress_sigid = g_signal_connect (hifstate, "percentage-changed",
-                                             G_CALLBACK (on_hifstate_percentage_changed),
-                                             "Installing packages:");
-
-    glnx_console_lock (&console);
-
-    if (!libcontainer_prep_dev (rootfs_dfd, error))
-      return FALSE;
-
-    if (!dnf_transaction_commit (dnf_context_get_transaction (hifctx),
-                                 dnf_context_get_goal (hifctx),
-                                 hifstate,
-                                 error))
-      return FALSE;
-
-    g_signal_handler_disconnect (hifstate, progress_sigid);
-  }
+        return FALSE;
+    }
 
   if (out_unmodified)
     *out_unmodified = FALSE;
@@ -672,13 +716,31 @@ impl_compose_tree (const char      *treefile_pathstr,
   if (!rpmostree_bwrap_selftest (error))
     return FALSE;
 
+  self->repo = ostree_repo_open_at (AT_FDCWD, opt_repo, cancellable, error);
+  if (!self->repo)
+    return FALSE;
+
   if (opt_workdir_tmpfs)
     g_print ("note: --workdir-tmpfs is deprecated and will be ignored\n");
   if (!opt_workdir)
     {
-      if (!glnx_mkdtempat (AT_FDCWD, "/var/tmp/rpm-ostree.XXXXXX", 0700, &self->workdir_tmp, error))
-        return FALSE;
-      self->workdir = g_file_new_for_path (self->workdir_tmp.path);
+      if (!opt_ex_unprivileged)
+        {
+          if (!glnx_mkdtempat (AT_FDCWD, "/var/tmp/rpm-ostree.XXXXXX", 0700, &self->workdir_tmp, error))
+            return FALSE;
+        }
+      else
+        {
+          /* In the unified core case, our workdir needs to be in the same
+           * filesystem as the repo, for the same reasons we do this with
+           * package layering on the client side.
+           */
+          if (!glnx_mkdtempat (ostree_repo_get_dfd (self->repo), "tmp/rpm-ostree.XXXXXX", 0700,
+                               &self->workdir_tmp, error))
+            return FALSE;
+        }
+      g_autofree char *relpath = glnx_fdrel_abspath (self->workdir_tmp.fd, ".");
+      self->workdir = g_file_new_for_path (relpath);
       /* Note special handling of this aliasing in _finalize() */
       self->workdir_dfd = self->workdir_tmp.fd;
     }
@@ -691,10 +753,6 @@ impl_compose_tree (const char      *treefile_pathstr,
     }
 
   self->treefile_context_dirs = g_ptr_array_new_with_free_func ((GDestroyNotify)g_object_unref);
-  self->repo = ostree_repo_open_at (AT_FDCWD, opt_repo, cancellable, error);
-  if (!self->repo)
-    return FALSE;
-
   self->treefile = g_file_new_for_path (treefile_pathstr);
 
   if (opt_cachedir)
@@ -979,7 +1037,7 @@ impl_compose_tree (const char      *treefile_pathstr,
 
   g_autofree char *new_revision = NULL;
   if (!rpmostree_commit (rootfs_fd, self->repo, self->ref, opt_write_commitid_to,
-                         metadata, gpgkey, selinux, NULL,
+                         metadata, gpgkey, selinux, self->devino_cache,
                          &new_revision,
                          cancellable, error))
     return FALSE;
@@ -1020,6 +1078,9 @@ rpmostree_compose_builtin_tree (int             argc,
       rpmostree_usage_error (context, "--repo must be specified", error);
       return EXIT_FAILURE;
     }
+
+  if (getuid () != 0 && !opt_ex_unprivileged)
+    return glnx_throw (error, "This command requires root privileges"), EXIT_FAILURE;
 
   if (!impl_compose_tree (argv[1], cancellable, error))
     return EXIT_FAILURE;

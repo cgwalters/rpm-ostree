@@ -29,7 +29,7 @@
 #include <glib/gi18n.h>
 
 static RpmOstreeCommand compose_subcommands[] = {
-  { "tree", RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD | RPM_OSTREE_BUILTIN_FLAG_REQUIRES_ROOT,
+  { "tree", RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD,
     "Install packages and commit the result to an OSTree repository",
     rpmostree_compose_builtin_tree },
   { NULL, 0, NULL, NULL }

@@ -57,6 +57,7 @@ rpmostree_passwd_migrate_except_root (int            rootfs_dfd,
 gboolean
 rpmostree_generate_passwd_from_previous (OstreeRepo      *repo,
                                          int              rootfs_dfd,
+                                         gboolean         unified_core,
                                          GFile           *treefile_dirpath,
                                          GFile           *previous_root,
                                          JsonObject      *treedata,

@@ -13,6 +13,8 @@ struct RpmOstreePackageScriptHandler;
 %includes
 %%
 glibc.prein, RPMOSTREE_SCRIPT_ACTION_IGNORE
+# We take over depmod/dracut etc. 
+kernel-core.posttrans, RPMOSTREE_SCRIPT_ACTION_IGNORE
 # Legacy workaround
 glibc-headers.prein, RPMOSTREE_SCRIPT_ACTION_IGNORE
 # workaround for old bug?
@@ -21,6 +23,7 @@ coreutils.prein, RPMOSTREE_SCRIPT_ACTION_IGNORE
 ca-certificates.prein, RPMOSTREE_SCRIPT_ACTION_IGNORE
 libgcc.post, RPMOSTREE_SCRIPT_ACTION_IGNORE
 setup.post, RPMOSTREE_SCRIPT_ACTION_IGNORE
+nfs-utils.post, RPMOSTREE_SCRIPT_ACTION_IGNORE /* Broken chown */
 pinentry.prein, RPMOSTREE_SCRIPT_ACTION_IGNORE
 fedora-release.post, RPMOSTREE_SCRIPT_ACTION_IGNORE
 fedora-release.posttrans, RPMOSTREE_SCRIPT_ACTION_IGNORE
