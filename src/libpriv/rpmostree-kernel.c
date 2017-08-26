@@ -38,6 +38,10 @@
 #include "rpmostree-bwrap.h"
 #include "rpmostree-util.h"
 
+/* Keep this in sync with ostree/src/libostree/ostree-sysroot-deploy.c:get_kernel_from_tree().
+ * Note they are of necessity slightly different since rpm-ostree needs
+ * to support grabbing wherever the Fedora kernel RPM dropped files as well.
+ */
 static gboolean
 find_kernel_and_initramfs_in_bootdir (int          rootfs_dfd,
                                       const char  *bootdir,
@@ -80,25 +84,16 @@ find_kernel_and_initramfs_in_bootdir (int          rootfs_dfd,
       name = dent->d_name;
 
       /* Current Fedora 23 kernel.spec installs as just vmlinuz */
-      if (strcmp (name, "vmlinuz") == 0 || g_str_has_prefix (name, "vmlinuz-"))
+      if (g_str_equal (name, "vmlinuz") || g_str_has_prefix (name, "vmlinuz-"))
         {
           if (ret_kernel)
-            {
-              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "Multiple vmlinuz- in %s",
-                           bootdir);
-              return FALSE;
-            }
+            return glnx_throw (error, "Multiple vmlinuz- in %s", bootdir);
           ret_kernel = g_strconcat (bootdir, "/", name, NULL);
         }
-      else if (g_str_has_prefix (name, "initramfs-"))
+      else if (g_str_equal (name, "initramfs.img") || g_str_has_prefix (name, "initramfs-"))
         {
           if (ret_initramfs)
-            {
-              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                           "Multiple initramfs- in %s", bootdir);
-              return FALSE;
-            }
+            return glnx_throw (error, "Multiple initramfs- in %s", bootdir);
           ret_initramfs = g_strconcat (bootdir, "/", name, NULL);
         }
     }
@@ -153,8 +148,8 @@ find_ensure_one_subdirectory (int            rootfs_dfd,
 /* Given a root filesystem, return a GVariant of format (sssms):
  *  - kver: uname -r equivalent
  *  - bootdir: Path to the boot directory
- *  - kernel_path: Relative path to kernel
- *  - initramfs_path: Relative path to initramfs (may be NULL if no initramfs)
+ *  - kernel_path: Relative (to rootfs) path to kernel
+ *  - initramfs_path: Relative (to rootfs) path to initramfs (may be NULL if no initramfs)
  */
 GVariant *
 rpmostree_find_kernel (int rootfs_dfd,
@@ -211,8 +206,9 @@ rpmostree_find_kernel (int rootfs_dfd,
   return g_variant_ref_sink (g_variant_new ("(sssms)", kver, bootdir, kernel_path, initramfs_path));
 }
 
-/* Given a kernel path and a temporary initramfs, compute their checksum and put
- * them in their final locations.
+/* Given a kernel path and a temporary initramfs, place them in their final
+ * location. We handle /usr/lib/modules as well as the /usr/lib/ostree-boot and
+ * /boot paths where we need to pre-compute their checksum.
  */
 gboolean
 rpmostree_finalize_kernel (int rootfs_dfd,
@@ -220,42 +216,101 @@ rpmostree_finalize_kernel (int rootfs_dfd,
                            const char *kver,
                            const char *kernel_path,
                            GLnxTmpfile *initramfs_tmpf,
+                           RpmOstreeFinalizeKernelDestination dest,
                            GCancellable *cancellable,
                            GError **error)
 {
-  g_autoptr(GChecksum) boot_checksum = NULL;
-  g_autofree char *kernel_final_path = NULL;
-  g_autofree char *initramfs_final_path = NULL;
-  const char *boot_checksum_str = NULL;
+  const char slash_bootdir[] = "boot";
+  const char usrlibostree_bootdir[] = "usr/lib/ostree-boot";
+  g_autofree char *modules_bootdir = g_strconcat ("usr/lib/modules/", kver, NULL);
 
-  /* Now, calculate the combined sha256sum of the two. We checksum the initramfs
-   * from the tmpfile fd (via mmap()) to avoid writing it to disk in another
-   * temporary location.
+  /* Calculate the sha256sum of the kernel+initramfs (called the "boot
+   * checksum"). We checksum the initramfs from the tmpfile fd (via mmap()) to
+   * avoid writing it to disk in another temporary location.
    */
-  boot_checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_autoptr(GChecksum) boot_checksum = g_checksum_new (G_CHECKSUM_SHA256);
   if (!_rpmostree_util_update_checksum_from_file (boot_checksum, rootfs_dfd, kernel_path,
                                                   cancellable, error))
     return FALSE;
-
   { g_autoptr(GMappedFile) mfile = g_mapped_file_new_from_fd (initramfs_tmpf->fd, FALSE, error);
     if (!mfile)
       return FALSE;
     g_checksum_update (boot_checksum, (guint8*)g_mapped_file_get_contents (mfile),
                        g_mapped_file_get_length (mfile));
   }
-  boot_checksum_str = g_checksum_get_string (boot_checksum);
+  const char *boot_checksum_str = g_checksum_get_string (boot_checksum);
 
-  kernel_final_path = g_strconcat (bootdir, "/", "vmlinuz-", kver, "-", boot_checksum_str, NULL);
-  initramfs_final_path = g_strconcat (bootdir, "/", "initramfs-", kver, ".img-", boot_checksum_str, NULL);
-
-  /* Put the kernel in the final location */
-  if (!glnx_renameat (rootfs_dfd, kernel_path, rootfs_dfd, kernel_final_path, error))
-    return FALSE;
-  /* Link the initramfs directly to its final destination */
+  g_autofree char *kernel_modules_path = g_strconcat (modules_bootdir, "/vmlinuz", NULL);;
+  /* It's possible the bootdir is already the modules directory; in that case,
+   * we don't need to rename.
+   */
+  if (!g_str_equal (kernel_path, kernel_modules_path))
+    {
+      g_assert_cmpstr (bootdir, !=, modules_bootdir);
+      if (!glnx_renameat (rootfs_dfd, kernel_path, rootfs_dfd, kernel_modules_path, error))
+        return FALSE;
+    }
+  g_autofree char *initramfs_modules_path = g_strconcat (modules_bootdir, "/initramfs.img", NULL);
   if (!glnx_link_tmpfile_at (initramfs_tmpf, GLNX_LINK_TMPFILE_NOREPLACE,
-                             rootfs_dfd, initramfs_final_path,
+                             rootfs_dfd, initramfs_modules_path,
                              error))
     return FALSE;
+
+  /* Update /usr/lib/ostree-boot and /boot (if we find a kernel there) */
+  const char *legacy_paths[] = { usrlibostree_bootdir, slash_bootdir };
+  int upto_index;
+  switch (dest)
+    {
+    case RPMOSTREE_FINALIZE_KERNEL_AUTO:
+      upto_index = 0;
+      break;
+    case RPMOSTREE_FINALIZE_KERNEL_USRLIBOSTREE_BOOT:
+      upto_index = 1;
+      break;
+    case RPMOSTREE_FINALIZE_KERNEL_SLASH_BOOT:
+      upto_index = 2;
+      break;
+    }
+  for (guint i = 0; i < G_N_ELEMENTS (legacy_paths); i++)
+    {
+      const char *legacy_bootdir = legacy_paths[i];
+      /* If the bootdir is the one we're looking at, skip it */
+      if (g_str_equal (bootdir, legacy_bootdir))
+        continue;
+
+      g_autofree char *legacy_kernel_path = NULL;
+      g_autofree char* legacy_initramfs_path = NULL;
+      if (!find_kernel_and_initramfs_in_bootdir (rootfs_dfd, legacy_bootdir,
+                                                 &legacy_kernel_path, &legacy_initramfs_path,
+                                                 cancellable, error))
+        return FALSE;
+
+      /* No kernel found? Skip to the next, unless we're configured to forcibly
+       * ensure the kernel is present in that location too.
+       */
+      if (!legacy_kernel_path && i >= upto_index)
+        continue;
+
+      if (legacy_kernel_path)
+        {
+          if (!glnx_unlinkat (rootfs_dfd, legacy_kernel_path, 0, error))
+            return FALSE;
+          g_free (legacy_kernel_path);
+        }
+      if (legacy_initramfs_path)
+        {
+          if (!glnx_unlinkat (rootfs_dfd, legacy_initramfs_path, 0, error))
+            return FALSE;
+          g_free (legacy_initramfs_path);
+        }
+
+      legacy_kernel_path = g_strconcat (usrlibostree_bootdir, "/", "vmlinuz-", kver, "-", boot_checksum_str, NULL);
+      if (linkat (rootfs_dfd, kernel_modules_path, rootfs_dfd, legacy_kernel_path, 0) < 0)
+        return glnx_throw_errno_prefix (error, "linkat(%s)", legacy_kernel_path);
+      legacy_initramfs_path = g_strconcat (usrlibostree_bootdir, "/", "initramfs-", kver, ".img-", boot_checksum_str, NULL);
+      if (linkat (rootfs_dfd, initramfs_modules_path, rootfs_dfd, legacy_initramfs_path, 0) < 0)
+        return glnx_throw_errno_prefix (error, "linkat(%s)", legacy_initramfs_path);
+    }
 
   return TRUE;
 }
@@ -341,12 +396,16 @@ rpmostree_run_dracut (int     rootfs_dfd,
                                       &tmpf, error))
     goto out;
 
+  /* If we're rebuilding, we use the *current* /etc so we pick up any modified
+   * config files.  Otherwise, we use the usr/etc defaults.
+   */
   if (rebuild_from_initramfs)
     bwrap = rpmostree_bwrap_new (rootfs_dfd, RPMOSTREE_BWRAP_IMMUTABLE, error,
                                  "--ro-bind", "/etc", "/etc",
                                  NULL);
   else
     bwrap = rpmostree_bwrap_new (rootfs_dfd, RPMOSTREE_BWRAP_IMMUTABLE, error,
+                                 "--ro-bind", "./usr/etc", "/etc",
                                  NULL);
   if (!bwrap)
     return FALSE;

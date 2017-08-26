@@ -22,6 +22,12 @@
 
 #include <ostree.h>
 
+typedef enum {
+  RPMOSTREE_FINALIZE_KERNEL_AUTO,
+  RPMOSTREE_FINALIZE_KERNEL_USRLIBOSTREE_BOOT,
+  RPMOSTREE_FINALIZE_KERNEL_SLASH_BOOT,
+} RpmOstreeFinalizeKernelDestination;
+
 GVariant *
 rpmostree_find_kernel (int rootfs_dfd,
                        GCancellable *cancellable,
@@ -33,6 +39,7 @@ rpmostree_finalize_kernel (int rootfs_dfd,
                            const char *kver,
                            const char *kernel_path,
                            GLnxTmpfile *initramfs_tmpf,
+                           RpmOstreeFinalizeKernelDestination dest,
                            GCancellable *cancellable,
                            GError **error);
 
