@@ -358,7 +358,6 @@ process_kernel_and_initramfs (int            rootfs_dfd,
   /* We always tell rpmostree_finalize_kernel() to skip /boot, since we'll do a
    * full hardlink pass if needed after that for the kernel + bootloader data.
    */
-  g_autofree char *initramfs_final_path = NULL;
   if (!rpmostree_finalize_kernel (rootfs_dfd, bootdir, kver, kernel_path,
                                   &initramfs_tmpf,
                                   RPMOSTREE_FINALIZE_KERNEL_USRLIBOSTREE_BOOT,
