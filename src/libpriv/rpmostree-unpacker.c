@@ -54,6 +54,8 @@ struct RpmOstreeUnpacker
   struct archive *archive;
   int fd;
   gboolean owns_fd;
+  uid_t my_uid;
+  gid_t my_gid;
   Header hdr;
   rpmfi fi;
   off_t cpio_offset;
@@ -634,21 +636,30 @@ compose_filter_cb (OstreeRepo         *repo,
     }
   else if (!error_was_set)
     {
-      /* sanity check that RPM isn't using CPIO id fields */
-      if (uid != 0 || gid != 0)
-        {
-          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "RPM had unexpected non-root owned path \"%s\", marked as %u:%u)", path, uid, gid);
-          return OSTREE_REPO_COMMIT_FILTER_SKIP;
-        }
-      /* And ensure the RPM installs into supported paths */
-      else if (!path_is_ostree_compliant (path))
+      /* Ensure the RPM installs into supported paths */
+      if (!path_is_ostree_compliant (path))
         {
           if ((self->flags & RPMOSTREE_UNPACKER_FLAGS_SKIP_EXTRANEOUS) == 0)
             g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                          "Unsupported path: %s; See %s",
                          path, "https://github.com/projectatomic/rpm-ostree/issues/233");
           return OSTREE_REPO_COMMIT_FILTER_SKIP;
+        }
+
+      /* Handle uid/gid */
+      if (self->my_uid == 0 && (uid != 0 || gid != 0))
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "RPM had unexpected non-root owned path \"%s\", marked as %u:%u)", path, uid, gid);
+          return OSTREE_REPO_COMMIT_FILTER_SKIP;
+        }
+      else if (self->my_uid != 0)
+        {
+          /* In the unprivileged path, explicitly set uid/gid to zero - let's
+           * treat those as the canonical ones.
+           */
+          g_file_info_set_attribute_uint32 (file_info, "unix::uid", 0);
+          g_file_info_set_attribute_uint32 (file_info, "unix::gid", 0);
         }
     }
 
@@ -711,6 +722,10 @@ import_rpm_to_repo (RpmOstreeUnpacker *self,
   /* Passed to the commit modifier */
   GError *cb_error = NULL;
   cb_data fdata = { self, &cb_error };
+
+  /* In the unpriv case we may see our own uid/gid from unpacking */
+  self->my_uid = getuid ();
+  self->my_gid = getgid ();
 
   OstreeRepoCommitFilter filter;
   if ((self->flags & RPMOSTREE_UNPACKER_FLAGS_UNPRIVILEGED) > 0)
