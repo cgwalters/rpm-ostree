@@ -34,6 +34,7 @@ rpmostree_treefile_postprocessing (int            rootfs_fd,
                                    GBytes        *serialized_treefile,
                                    JsonObject    *treefile,
                                    const char    *next_version,
+                                   gboolean       unified_core_mode,
                                    GCancellable  *cancellable,
                                    GError       **error);
 
@@ -59,6 +60,16 @@ rpmostree_prepare_rootfs_get_sepolicy (int            dfd,
                                        GError       **error);
 
 gboolean
+rpmostree_rootfs_prepare_selinux (int rootfs_dfd,
+                                  GCancellable *cancellable,
+                                  GError       **error);
+
+gboolean
+rpmostree_postprocess_selinux_policy_store_location (int rootfs_dfd,
+                                                     GCancellable *cancellable,
+                                                     GError       **error);
+
+gboolean
 rpmostree_prepare_rootfs_for_commit (int            src_rootfs_dfd,
                                      int            target_rootfs_dfd,
                                      JsonObject    *treefile,
@@ -68,6 +79,7 @@ rpmostree_prepare_rootfs_for_commit (int            src_rootfs_dfd,
 gboolean
 rpmostree_postprocess_final (int            rootfs_dfd,
                              JsonObject    *treefile,
+                             gboolean       unified_core_mode,
                              GCancellable  *cancellable,
                              GError       **error);
 

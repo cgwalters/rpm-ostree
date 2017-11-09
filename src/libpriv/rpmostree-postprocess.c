@@ -51,13 +51,14 @@ typedef enum {
   RPMOSTREE_POSTPROCESS_BOOT_LOCATION_NEW
 } RpmOstreePostprocessBootLocation;
 
-/* This bwrap case is for treecompose which isn't yet operating on
- * hardlinks, so we just bind mount things mutably.
+/* The "unified_core_mode" flag controls whether or not we use rofiles-fuse,
+ * just like pkg layering.
  */
 static gboolean
 run_bwrap_mutably (int           rootfs_fd,
                    const char   *binpath,
                    char        **child_argv,
+                   gboolean      unified_core_mode,
                    GCancellable *cancellable,
                    GError      **error)
 {
@@ -74,7 +75,10 @@ run_bwrap_mutably (int           rootfs_fd,
     etc_bind = "etc";
 
   g_autoptr(RpmOstreeBwrap) bwrap =
-    rpmostree_bwrap_new (rootfs_fd, RPMOSTREE_BWRAP_MUTATE_FREELY, error,
+    rpmostree_bwrap_new (rootfs_fd,
+                         unified_core_mode ? RPMOSTREE_BWRAP_MUTATE_ROFILES :
+                                             RPMOSTREE_BWRAP_MUTATE_FREELY,
+                         error,
                          "--bind", "var", "/var",
                          "--bind", etc_bind, "/etc",
                          NULL);
@@ -253,6 +257,7 @@ hardlink_recurse (int                src_dfd,
 static gboolean
 process_kernel_and_initramfs (int            rootfs_dfd,
                               JsonObject    *treefile,
+                              gboolean       unified_core_mode,
                               GCancellable  *cancellable,
                               GError       **error)
 {
@@ -329,7 +334,7 @@ process_kernel_and_initramfs (int            rootfs_dfd,
    */
   {
     char *child_argv[] = { "depmod", (char*)kver, NULL };
-    if (!run_bwrap_mutably (rootfs_dfd, "depmod", child_argv, cancellable, error))
+    if (!run_bwrap_mutably (rootfs_dfd, "depmod", child_argv, unified_core_mode, cancellable, error))
       return FALSE;
   }
 
@@ -787,11 +792,43 @@ replace_nsswitch (int            dfd,
   return TRUE;
 }
 
+/* Change the policy store location.
+ * Part of SELinux in Fedora >= 24: https://bugzilla.redhat.com/show_bug.cgi?id=1290659
+ */
+gboolean
+rpmostree_rootfs_prepare_selinux (int rootfs_dfd,
+                                  GCancellable *cancellable,
+                                  GError **error)
+{
+  const char *semanage_path = "usr/etc/selinux/semanage.conf";
+
+  /* Check if the config file exists; if not, do nothing silently */
+  if (!glnx_fstatat_allow_noent (rootfs_dfd, semanage_path, NULL, AT_SYMLINK_NOFOLLOW, error))
+    return FALSE;
+  if (errno == ENOENT)
+    return TRUE;
+
+  g_autofree char *orig_contents =
+    glnx_file_get_contents_utf8_at (rootfs_dfd, semanage_path, NULL,
+                                    cancellable, error);
+  if (orig_contents == NULL)
+    return glnx_prefix_error (error, "Opening %s", semanage_path);
+
+  g_autofree char *contents = g_strconcat (orig_contents, "\nstore-root=/etc/selinux\n", NULL);
+
+  if (!glnx_file_replace_contents_at (rootfs_dfd, semanage_path,
+                                      (guint8*)contents, -1, 0,
+                                      cancellable, error))
+    return glnx_prefix_error (error, "Replacing %s", semanage_path);
+
+  return TRUE;
+}
+
 /* SELinux in Fedora >= 24: https://bugzilla.redhat.com/show_bug.cgi?id=1290659 */
-static gboolean
-postprocess_selinux_policy_store_location (int rootfs_dfd,
-                                           GCancellable *cancellable,
-                                           GError **error)
+gboolean
+rpmostree_postprocess_selinux_policy_store_location (int rootfs_dfd,
+                                                     GCancellable *cancellable,
+                                                     GError **error)
 {
   g_auto(GLnxDirFdIterator) dfd_iter = { 0, };
   glnx_unref_object OstreeSePolicy *sepolicy = NULL;
@@ -821,22 +858,8 @@ postprocess_selinux_policy_store_location (int rootfs_dfd,
     }
   g_print ("SELinux policy in /var, enabling workaround\n");
 
-  { g_autofree char *orig_contents = NULL;
-    g_autofree char *contents = NULL;
-    const char *semanage_path = "usr/etc/selinux/semanage.conf";
-
-    orig_contents = glnx_file_get_contents_utf8_at (rootfs_dfd, semanage_path, NULL,
-                                                    cancellable, error);
-    if (orig_contents == NULL)
-      return glnx_prefix_error (error, "Opening %s", semanage_path);
-
-    contents = g_strconcat (orig_contents, "\nstore-root=/etc/selinux\n", NULL);
-
-    if (!glnx_file_replace_contents_at (rootfs_dfd, semanage_path,
-                                        (guint8*)contents, -1, 0,
-                                        cancellable, error))
-      return glnx_prefix_error (error, "Replacing %s", semanage_path);
-  }
+  if (!rpmostree_rootfs_prepare_selinux (rootfs_dfd, cancellable, error))
+    return FALSE;
 
   etc_policy_location = glnx_strjoina ("usr/etc/selinux/", name);
   if (!glnx_opendirat (rootfs_dfd, etc_policy_location, TRUE, &etc_selinux_dfd, error))
@@ -870,6 +893,7 @@ postprocess_selinux_policy_store_location (int rootfs_dfd,
 gboolean
 rpmostree_postprocess_final (int            rootfs_dfd,
                              JsonObject    *treefile,
+                             gboolean       unified_core_mode,
                              GCancellable  *cancellable,
                              GError       **error)
 {
@@ -923,7 +947,7 @@ rpmostree_postprocess_final (int            rootfs_dfd,
 
   if (selinux)
     {
-      if (!postprocess_selinux_policy_store_location (rootfs_dfd, cancellable, error))
+      if (!rpmostree_postprocess_selinux_policy_store_location (rootfs_dfd, cancellable, error))
         return glnx_prefix_error (error, "SELinux postprocess");
     }
 
@@ -963,7 +987,7 @@ rpmostree_postprocess_final (int            rootfs_dfd,
       if (!glnx_shutil_rm_rf_at (rootfs_dfd, "boot/loader", cancellable, error))
         return FALSE;
 
-      if (!process_kernel_and_initramfs (rootfs_dfd, treefile,
+      if (!process_kernel_and_initramfs (rootfs_dfd, treefile, unified_core_mode,
                                          cancellable, error))
         return glnx_prefix_error (error, "During kernel processing");
     }
@@ -1356,6 +1380,7 @@ rpmostree_treefile_postprocessing (int            rootfs_fd,
                                    GBytes        *serialized_treefile,
                                    JsonObject    *treefile,
                                    const char    *next_version,
+                                   gboolean       unified_core_mode,
                                    GCancellable  *cancellable,
                                    GError       **error)
 {
@@ -1611,7 +1636,7 @@ rpmostree_treefile_postprocessing (int            rootfs_fd,
 
       {
         char *child_argv[] = { binpath, NULL };
-        if (!run_bwrap_mutably (rootfs_fd, binpath, child_argv, cancellable, error))
+        if (!run_bwrap_mutably (rootfs_fd, binpath, child_argv, unified_core_mode, cancellable, error))
           return glnx_prefix_error (error, "While executing postprocessing script '%s'", bn);
       }
 
