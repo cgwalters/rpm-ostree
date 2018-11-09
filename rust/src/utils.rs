@@ -22,26 +22,6 @@ use std::io::prelude::*;
 use std::{fs, io};
 use tempfile;
 
-use curl::easy::Easy;
-
-fn download_url_to_tmpfile(url: &str) -> Fallible<fs::File> {
-    let mut tmpf = tempfile::tempfile()?;
-    {
-        let mut output = io::BufWriter::new(&mut tmpf);
-        let mut handle = Easy::new();
-        handle.follow_location(true)?;
-        handle.fail_on_error(true)?;
-        handle.url(url)?;
-
-        let mut transfer = handle.transfer();
-        transfer.write_function(|data| output.write_all(data).and(Ok(data.len())).or(Ok(0)))?;
-        transfer.perform()?;
-    }
-
-    tmpf.seek(io::SeekFrom::Start(0))?;
-    Ok(tmpf)
-}
-
 /// Given an input string `s`, replace variables of the form `${foo}` with
 /// values provided in `vars`.  No quoting syntax is available, so it is
 /// not possible to have a literal `${` in the string.
@@ -122,21 +102,6 @@ mod ffi {
     use std::ffi::CString;
     use std::os::unix::io::IntoRawFd;
     use std::ptr;
-
-    #[no_mangle]
-    pub extern "C" fn ror_download_to_fd(
-        url: *const libc::c_char,
-        gerror: *mut *mut glib_sys::GError,
-    ) -> libc::c_int {
-        let url = ffi_view_nullable_str(url).unwrap();
-        match download_url_to_tmpfile(url) {
-            Ok(f) => f.into_raw_fd(),
-            Err(e) => {
-                error_to_glib(&e, gerror);
-                -1
-            }
-        }
-    }
 
     #[no_mangle]
     pub extern "C" fn ror_util_varsubst(
