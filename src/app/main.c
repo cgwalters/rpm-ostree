@@ -30,6 +30,7 @@
 #include <locale.h>
 
 #include "rpmostree-builtins.h"
+#include "rpmostree-rust.h"
 #include "rpmostree-polkit-agent.h"
 
 #include "libglnx.h"
@@ -391,7 +392,6 @@ int
 main (int    argc,
       char **argv)
 {
-  GCancellable *cancellable = g_cancellable_new ();
   RpmOstreeCommand *command;
   const char *command_name = NULL;
   g_autofree char *prgname = NULL;
@@ -416,6 +416,8 @@ main (int    argc,
   g_set_prgname (argv[0]);
 
   setlocale (LC_ALL, "");
+
+  GCancellable *cancellable = g_cancellable_new ();
 
   /*
    * Parse the global options. We rearrange the options as

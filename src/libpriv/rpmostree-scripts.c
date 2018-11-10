@@ -21,9 +21,11 @@
 #include "config.h"
 
 #include <gio/gio.h>
+#include <glib-unix.h>
 #include <systemd/sd-journal.h>
 #include "rpmostree-output.h"
 #include "rpmostree-util.h"
+#include "rpmostree-rust.h"
 #include "rpmostree-bwrap.h"
 #include <err.h>
 #include <systemd/sd-journal.h>
@@ -336,6 +338,7 @@ run_script_in_bwrap_container (int rootfs_fd,
   gboolean created_var_lib_rpmstate = FALSE;
   glnx_autofd int stdout_fd = -1;
   glnx_autofd int stderr_fd = -1;
+  glnx_autofd int useradd_pipe_fd = -1;
 
   /* TODO - Create a pipe and send this to bwrap so it's inside the
    * tmpfs.  Note the +1 on the path to skip the leading /.
@@ -441,6 +444,19 @@ run_script_in_bwrap_container (int rootfs_fd,
           data.stdout_fd = data.stderr_fd = buffered_output.fd;
         }
 
+      /* Special API to pass useradd/groupadd invocations back up to the parent
+       * outside the root.
+       */
+      { int useradd_pipefds[2];
+        if (!g_unix_open_pipe (useradd_pipefds, FD_CLOEXEC, error))
+          return FALSE;
+        useradd_pipe_fd = useradd_pipefds[0]; // Extract the read side
+        int useradd_pipe_write = useradd_pipefds[1];
+        g_autofree char *useradd_env = g_strdup_printf ("%d", useradd_pipe_write);
+        rpmostree_bwrap_take_fd (bwrap, useradd_pipe_write, useradd_pipe_write);
+        rpmostree_bwrap_setenv (bwrap, "RPMOSTREE_USERADD_FD", useradd_env);
+      }
+
       data.all_fds_initialized = TRUE;
       rpmostree_bwrap_set_child_setup (bwrap, script_child_setup, &data);
 
@@ -474,10 +490,14 @@ run_script_in_bwrap_container (int rootfs_fd,
           (*error)->message =
             g_strdup_printf ("%s; run `journalctl -t '%s'` for more information", errmsg, id);
         }
+      g_printerr ("\n\n%s failed\n\n\n", pkg_script);
       goto out;
     }
   else
     dump_buffered_output_noerr (pkg_script, &buffered_output);
+
+  if (!ror_sysusers_process_useradd (rootfs_fd, glnx_steal_fd (&useradd_pipe_fd), error))
+    return FALSE;
 
   ret = TRUE;
  out:

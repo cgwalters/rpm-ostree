@@ -3669,6 +3669,71 @@ rpmostree_context_get_kernel_changed (RpmOstreeContext *self)
   return self->kernel_changed;
 }
 
+/* Given a relative binary path e.g. usr/bin/systemctl,
+ * if it exists, replace it with a wrapper and record
+ * that we did the replacement in @replacements so we can
+ * undo it later.
+ */
+static gboolean
+replace_with_wrapper (int        rootfs_dfd,
+                      const char *binpath,
+                      GPtrArray  *replacements,
+                      GError    **error)
+{
+  g_assert_cmpint (binpath[0], !=, '/');
+  const char *binpath_saved = glnx_strjoina (binpath, ".rpmostreesave");
+  if (renameat (rootfs_dfd, binpath, rootfs_dfd, binpath_saved) < 0)
+    {
+      /* Doesn't exist?  Nothing to do */
+      if (errno == ENOENT)
+        return TRUE;
+      else
+        return glnx_throw_errno_prefix (error, "rename(%s)", binpath);
+    }
+  else
+    {
+      const char *basename = glnx_basename (binpath);
+      const char *key = glnx_strjoina ("/rpmostree/", basename, "-wrapper.sh");
+      g_autoptr(GBytes) wrapper = g_resources_lookup_data (key, G_RESOURCE_LOOKUP_FLAGS_NONE, error);
+      if (!wrapper)
+        return FALSE;
+      size_t len;
+      const guint8* buf = g_bytes_get_data (wrapper, &len);
+      if (!glnx_file_replace_contents_with_perms_at (rootfs_dfd, binpath,
+                                                     buf, len, 0755, (uid_t) -1, (gid_t) -1,
+                                                     GLNX_FILE_REPLACE_NODATASYNC,
+                                                     NULL, error))
+        return FALSE;
+    }
+
+  g_ptr_array_add (replacements, g_strdup (binpath));
+
+  return TRUE;
+}
+
+/* Reverse the effect of replace_with_wrapper() */
+static gboolean
+undo_wrappers (int         rootfs_dfd,
+               GPtrArray  *replacements,
+               GError    **error)
+{
+  g_autoptr(GString) buf = g_string_new ("");
+
+  for (guint i = 0; i < replacements->len; i++)
+    {
+      const char *binpath = replacements->pdata[i];
+      g_string_truncate (buf, 0);
+      g_string_append (buf, binpath);
+      g_string_append (buf, ".rpmostreesave");
+
+      if (!glnx_renameat (rootfs_dfd, buf->str,
+                          rootfs_dfd, binpath, error))
+        return FALSE;
+    }
+
+  return TRUE;
+}
+
 gboolean
 rpmostree_context_assemble (RpmOstreeContext      *self,
                             GCancellable          *cancellable,
@@ -3945,7 +4010,6 @@ rpmostree_context_assemble (RpmOstreeContext      *self,
   if (overlays->len > 0 || overrides_replace->len > 0)
     {
       gboolean have_passwd;
-      gboolean have_systemctl;
       g_autoptr(GPtrArray) passwdents_ptr = NULL;
       g_autoptr(GPtrArray) groupents_ptr = NULL;
 
@@ -3964,7 +4028,7 @@ rpmostree_context_assemble (RpmOstreeContext      *self,
                                                   error))
         return FALSE;
 
-      /* Also neuter systemctl - at least glusterfs for example calls `systemctl
+      /* Neuter systemctl - at least glusterfs for example calls `systemctl
        * start` in its %post which both violates Fedora policy and also will not
        * work with the rpm-ostree model.
        * See also https://github.com/projectatomic/rpm-ostree/issues/550
@@ -3973,30 +4037,14 @@ rpmostree_context_assemble (RpmOstreeContext      *self,
        * point in the far future when we don't support CentOS7 we can drop
        * our wrapper script.  If we remember.
        */
-      if (renameat (tmprootfs_dfd, "usr/bin/systemctl",
-                    tmprootfs_dfd, "usr/bin/systemctl.rpmostreesave") < 0)
-        {
-          if (errno == ENOENT)
-            have_systemctl = FALSE;
-          else
-            return glnx_throw_errno_prefix (error, "rename(usr/bin/systemctl)");
-        }
-      else
-        {
-          have_systemctl = TRUE;
-          g_autoptr(GBytes) systemctl_wrapper = g_resources_lookup_data ("/rpmostree/systemctl-wrapper.sh",
-                                                                         G_RESOURCE_LOOKUP_FLAGS_NONE,
-                                                                         error);
-          if (!systemctl_wrapper)
-            return FALSE;
-          size_t len;
-          const guint8* buf = g_bytes_get_data (systemctl_wrapper, &len);
-          if (!glnx_file_replace_contents_with_perms_at (tmprootfs_dfd, "usr/bin/systemctl",
-                                                         buf, len, 0755, (uid_t) -1, (gid_t) -1,
-                                                         GLNX_FILE_REPLACE_NODATASYNC,
-                                                         cancellable, error))
-            return FALSE;
-        }
+      g_autoptr(GPtrArray) replaced_binaries = g_ptr_array_new_with_free_func (g_free);
+      if (!replace_with_wrapper (tmprootfs_dfd, "usr/bin/systemctl", replaced_binaries, error))
+        return FALSE;
+      /* And we intercept useradd/groupadd to convert to systemd-sysusers */
+      if (!replace_with_wrapper (tmprootfs_dfd, "usr/sbin/useradd", replaced_binaries, error))
+        return FALSE;
+      if (!replace_with_wrapper (tmprootfs_dfd, "usr/sbin/groupadd", replaced_binaries, error))
+        return FALSE;
 
       /* Necessary for unified core to work with semanage calls in %post, like container-selinux */
       if (!rpmostree_rootfs_fixup_selinux_store_root (tmprootfs_dfd, cancellable, error))
@@ -4124,12 +4172,11 @@ rpmostree_context_assemble (RpmOstreeContext      *self,
           !rpmostree_deployment_sanitycheck_true (tmprootfs_dfd, cancellable, error))
         return FALSE;
 
-      if (have_systemctl)
-        {
-          if (!glnx_renameat (tmprootfs_dfd, "usr/bin/systemctl.rpmostreesave",
-                              tmprootfs_dfd, "usr/bin/systemctl", error))
-            return FALSE;
-        }
+      if (!undo_wrappers (tmprootfs_dfd, replaced_binaries, error))
+        return FALSE;
+
+      if (!glnx_unlinkat (tmprootfs_dfd, "usr/bin/rpm-ostree-script-interceptor", 0, error))
+        return FALSE;
 
       if (have_passwd)
         {

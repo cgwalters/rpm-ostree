@@ -17,6 +17,7 @@
  */
 
 extern crate c_utf8;
+extern crate clap;
 extern crate curl;
 #[macro_use]
 extern crate failure;
@@ -46,3 +47,5 @@ mod journal;
 pub use journal::*;
 mod utils;
 pub use utils::*;
+mod sysusers;
+pub use sysusers::*;

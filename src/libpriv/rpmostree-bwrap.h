@@ -53,6 +53,10 @@ void rpmostree_bwrap_append_child_argva (RpmOstreeBwrap *bwrap, int argc, char *
 
 void rpmostree_bwrap_setenv (RpmOstreeBwrap *bwrap, const char *name, const char *value);
 
+void rpmostree_bwrap_take_fd (RpmOstreeBwrap *bwrap,
+                              int             source_fd,
+                              int             target_fd);
+
 void rpmostree_bwrap_set_child_setup (RpmOstreeBwrap *bwrap,
                                       GSpawnChildSetupFunc func,
                                       gpointer             data);
