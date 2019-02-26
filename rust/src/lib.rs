@@ -29,6 +29,9 @@ extern crate libc;
 extern crate openat;
 extern crate tempfile;
 extern crate rayon;
+extern crate nix;
+extern crate prctl;
+extern crate ipc_channel;
 
 #[macro_use]
 extern crate lazy_static;
