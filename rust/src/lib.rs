@@ -31,7 +31,6 @@ extern crate tempfile;
 extern crate rayon;
 extern crate nix;
 extern crate prctl;
-extern crate ipc_channel;
 
 #[macro_use]
 extern crate lazy_static;
@@ -40,6 +39,7 @@ extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
 extern crate serde_yaml;
+extern crate bincode;
 
 mod ffiutil;
 

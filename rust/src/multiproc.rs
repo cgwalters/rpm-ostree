@@ -18,12 +18,13 @@
 
 use failure::{Fallible, ResultExt};
 use clap::{App, Arg};
-use ipc_channel::ipc::{channel, IpcOneShotServer, IpcReceiver, IpcSender};
 use prctl;
+use bincode;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::default::Default;
 use std::io::BufRead;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::{env, fs, io, process};
 
@@ -32,10 +33,12 @@ const UNPRIVILEGED_UID : u32 = 1;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Message {
-    Ping(u32, String),
-    Pong(u32, String),
     Terminate,
+    TestMessage(Vec<u8>),
+//    HttpFetchMessage(Vec<u8>),
 }
+
+struct TestMessage(u32, String);
 
 pub struct Worker<S, R>
 where
@@ -43,8 +46,7 @@ where
     R: for<'de> Deserialize<'de> + Serialize,
 {
     child: process::Child,
-    tx: IpcSender<S>,
-    rx: IpcReceiver<R>,
+    sock: UnixStream,
 }
 
 // Ensure the child doesn't outlive us
@@ -53,11 +55,14 @@ fn prctl_set_pdeathsig_term() -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
 }
 
+fn new_io_err<D: Display>(e: &D) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, e.to_string())
+}
+
 fn preexec_drop_privs() -> io::Result<()> {
-    prctl_set_pdeathsig_term()?;
     (|| { nix::unistd::setgid(nix::unistd::Gid::from_raw(1))?;
           nix::unistd::setuid(nix::unistd::Uid::from_raw(1))
-    })().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    })().map_err(new_io_err)?;
     Ok(())
 }
 
@@ -79,28 +84,62 @@ where
     R: for<'de> Deserialize<'de> + Serialize,
 {
     fn new(opts: WorkerOpts) -> Fallible<Self> {
-        let (server, server_name) = IpcOneShotServer::new()?;
-        let before_exec = if !opts.privileged && nix::unistd::getuid().is_root() {
-            preexec_drop_privs
-        } else {
-            prctl_set_pdeathsig_term
-        };
+        let (sock, childsock) = UnixStream::pair()?;
+        let drop_privs : bool = !opts.privileged && nix::unistd::getuid().is_root();
         let child = process::Command::new("/proc/self/exe")
             .args(&["multiproc-worker", &server_name])
-            .before_exec(before_exec)
+            .before_exec(move || {
+                let childsock = childsock.into_raw_fd();
+                if childsock != 3 {
+                    nix::unistd::dup2(childsock, 3).map_err(new_io_err)?;
+                }
+                prctl_set_pdeathsig_term()?;
+                if drop_privs {
+                    preexec_drop_privs()?;
+                }
+                Ok(())
+            })
             .spawn().map_err(failure::Error::from)?;
-        let (_, (tx, rx)) = server.accept().map_err(failure::Error::from)?;
-        Ok(Self { child, tx, rx })
+        Ok(Self { child, sock })
     }
 
-    fn send(&self, msg: S) -> Fallible<()> {
-        self.tx.send(msg)?;
+    fn send(&self, msg: Message) -> Fallible<()> {
+        bincode::serde::serialize_into(self.sock, msg, bincode::SizeLimit::Infinite)?;
         Ok(())
     }
 
-    fn call(&self, msg: S) -> Fallible<R> {
-        self.send(msg)?;
-        self.rx.recv().map_err(|e| e.into())
+    fn call(&self, msg: Message) -> Fallible<Message> {
+        bincode::serde::serialize_into(self.sock, msg, bincode::SizeLimit::Infinite)?;
+        bincode::serde::deserialize_from(self.sock, bincode::SizeLimit::Infinite)?
+    }
+}
+
+struct WorkerImpl {
+    sock: UnixStream,
+}
+
+impl WorkerImpl {
+    fn new(sock: UnixStream) {
+        Self { sock, }
+    }
+
+    fn impl_testmessage(&self, msg: Vec<u8>) -> Fallible<()> {
+        let mut msg : TestMessage = bincode::serde::deserialize(&msg)?;
+        msg.0 += 1;
+        msg.1.insert(0, "x");
+        bincode::serde::serialize_into(self.sock, msg, bincode::SizeLimit::Infinite)?;
+    }
+
+    fn run(&self) -> Fallible<()> {
+        loop {
+            let msg = bincode::serde::deserialize_from(self.sock, bincode::SizeLimit::Infinite)?
+            match msg {
+                Message::Terminate => return Ok(()),
+                Message::TestMessage(buf) => {
+                    impl_testmessage(buf)?;
+                }
+            }
+        }
     }
 }
 
@@ -108,46 +147,22 @@ fn multiproc_run(argv: &Vec<String>) -> Fallible<()> {
     let app = App::new("rpmostree-multiproc")
         .version("0.1")
         .about("Multiprocessing entrypoint")
-        .arg(Arg::with_name("test").long("test"))
-        .arg(Arg::with_name("recv").required(true).takes_value(true));
+        .arg(Arg::with_name("test").long("test"));
     let matches = app.get_matches_from(argv);
     if matches.is_present("test") {
         let worker = Worker::new(Default::default())?;
         for i in 0..5 {
             let s = format!("hello world {}", i);
-            let r = worker.call(Message::Ping(i, s.clone()))?;
+            let r = worker.call(Message::TestMessage(TestMessage(i, s.clone())))?;
             println!("> ping");
-            match r {
-                Message::Pong(ri, ref rs) => {
-                    assert_eq!(i, ri);
-                    assert_eq!(&s, rs);
-                    println!("< pong");
-                }
-                v => panic!("Unexpected response: {:?}", v),
-            }
+            assert_eq!(i, r.0);
+            assert_eq!(&s, r.1);
+            println!("< pong");
         }
         worker.send(Message::Terminate)?;
     } else {
-        let basetx = IpcSender::connect(matches.value_of("recv").unwrap().to_string())
-            .map_err(failure::Error::from)?;
-        let (my_tx, their_rx): (IpcSender<Message>, IpcReceiver<Message>) =
-            channel().map_err(failure::Error::from)?;
-        let (their_tx, my_rx): (IpcSender<Message>, IpcReceiver<Message>) =
-            channel().map_err(failure::Error::from)?;
-        basetx
-            .send((their_tx, their_rx))
-            .map_err(failure::Error::from)?;
-        loop {
-            match my_rx.recv().map_err(failure::Error::from)? {
-                Message::Ping(v, ref s) => {
-                    my_tx
-                        .send(Message::Pong(v, s.clone()))
-                        .map_err(failure::Error::from)?;
-                }
-                Message::Terminate => break,
-                v => panic!("Unexpected message: {:?}", v),
-            }
-        }
+        let workerimpl = WorkerImpl::new(UnixStream::from_raw_fd(3));
+        workerimpl.run()?;
     }
     Ok(())
 }
