@@ -104,13 +104,13 @@ where
     }
 
     fn send(&self, msg: Message) -> Fallible<()> {
-        bincode::serde::serialize_into(self.sock, msg, bincode::SizeLimit::Infinite)?;
+        bincode::serialize_into(self.sock, msg)?;
         Ok(())
     }
 
     fn call(&self, msg: Message) -> Fallible<Message> {
-        bincode::serde::serialize_into(self.sock, msg, bincode::SizeLimit::Infinite)?;
-        bincode::serde::deserialize_from(self.sock, bincode::SizeLimit::Infinite)?
+        bincode::serialize_into(self.sock, msg)?;
+        bincode::deserialize_from(self.sock)?
     }
 }
 
@@ -124,15 +124,15 @@ impl WorkerImpl {
     }
 
     fn impl_testmessage(&self, msg: Vec<u8>) -> Fallible<()> {
-        let mut msg : TestMessage = bincode::serde::deserialize(&msg)?;
+        let mut msg : TestMessage = bincode::deserialize(&msg)?;
         msg.0 += 1;
         msg.1.insert(0, "x");
-        bincode::serde::serialize_into(self.sock, msg, bincode::SizeLimit::Infinite)?;
+        bincode::serialize_into(self.sock, msg)?;
     }
 
     fn run(&self) -> Fallible<()> {
         loop {
-            let msg = bincode::serde::deserialize_from(self.sock, bincode::SizeLimit::Infinite)?
+            let msg = bincode::deserialize_from(self.sock, bincode::SizeLimit::Infinite)?
             match msg {
                 Message::Terminate => return Ok(()),
                 Message::TestMessage(buf) => {
