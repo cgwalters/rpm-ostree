@@ -26,7 +26,7 @@ use std::default::Default;
 use std::io::BufRead;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::{env, fs, io, process};
 
 // This is "bin".  Down the line maybe use systemd dynamic users.
@@ -85,7 +85,7 @@ impl Worker
         let child = process::Command::new("/proc/self/exe")
             .args(&["multiproc-worker"])
             .before_exec(move || {
-                let childsock = childsock.into_raw_fd();
+                let childsock = childsock.as_raw_fd();
                 if childsock != 3 {
                     nix::unistd::dup2(childsock, 3).map_err(|e| new_io_err(e))?;
                 }
@@ -112,24 +112,26 @@ impl Worker
 
 struct WorkerImpl {
     sock: UnixStream,
+    r: io::BufReader<&UnixStream>,
+    w: io::BufWriter<&UnixStream>,
 }
 
 impl WorkerImpl {
     fn new(sock: UnixStream) -> Self {
-        Self { sock, }
+        Self { sock, r: io::BufReader::new(&sock), w: io::BufWriter::new(&sock), }
     }
 
     fn impl_testmessage(&self, msg: Vec<u8>) -> Fallible<()> {
         let mut msg : TestMessage = bincode::deserialize(&msg)?;
         msg.0 += 1;
         msg.1.insert(0, 'x');
-        bincode::serialize_into(&self.sock, &msg)?;
+        bincode::serialize_into(&self.w, &msg)?;
         Ok(())
     }
 
     fn run(&self) -> Fallible<()> {
         loop {
-            let msg = bincode::deserialize_from(&self.sock)?;
+            let msg = bincode::deserialize_from(&self.r)?;
             match msg {
                 Message::Terminate => return Ok(()),
                 Message::TestMessage(buf) => {
@@ -164,7 +166,7 @@ fn multiproc_run(argv: &Vec<String>) -> Fallible<()> {
         }
         worker.send(Message::Terminate)?;
     } else {
-        let workerimpl = WorkerImpl::new(UnixStream::from_raw_fd(3));
+        let workerimpl = WorkerImpl::new(unsafe { UnixStream::from_raw_fd(3) });
         workerimpl.run()?;
     }
     Ok(())
