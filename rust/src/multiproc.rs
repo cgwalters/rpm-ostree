@@ -100,13 +100,13 @@ impl Worker
     }
 
     fn send(&self, msg: Message) -> Fallible<()> {
-        bincode::serialize_into(self.sock, &msg)?;
+        bincode::serialize_into(&self.sock, &msg)?;
         Ok(())
     }
 
     fn call(&self, msg: Message) -> Fallible<Message> {
-        bincode::serialize_into(self.sock, &msg)?;
-        Ok(bincode::deserialize_from(self.sock)?)
+        bincode::serialize_into(&self.sock, &msg)?;
+        Ok(bincode::deserialize_from(&self.sock)?)
     }
 }
 
@@ -123,13 +123,13 @@ impl WorkerImpl {
         let mut msg : TestMessage = bincode::deserialize(&msg)?;
         msg.0 += 1;
         msg.1.insert(0, 'x');
-        bincode::serialize_into(self.sock, &msg)?;
+        bincode::serialize_into(&self.sock, &msg)?;
         Ok(())
     }
 
     fn run(&self) -> Fallible<()> {
         loop {
-            let msg = bincode::deserialize_from(self.sock)?;
+            let msg = bincode::deserialize_from(&self.sock)?;
             match msg {
                 Message::Terminate => return Ok(()),
                 Message::TestMessage(buf) => {
