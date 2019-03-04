@@ -26,6 +26,7 @@ use std::default::Default;
 use std::io::BufRead;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::{env, fs, io, process};
 
 // This is "bin".  Down the line maybe use systemd dynamic users.
@@ -38,12 +39,10 @@ pub enum Message {
 //    HttpFetchMessage(Vec<u8>),
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 struct TestMessage(u32, String);
 
-pub struct Worker<S, R>
-where
-    S: for<'de> Deserialize<'de> + Serialize,
-    R: for<'de> Deserialize<'de> + Serialize,
+pub struct Worker
 {
     child: process::Child,
     sock: UnixStream,
@@ -55,7 +54,7 @@ fn prctl_set_pdeathsig_term() -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
 }
 
-fn new_io_err<D: Display>(e: &D) -> io::Error {
+fn new_io_err<D: std::fmt::Display>(e: D) -> io::Error {
     io::Error::new(io::ErrorKind::Other, e.to_string())
 }
 
@@ -78,20 +77,17 @@ impl WorkerOpts {
     }
 }
 
-impl<S, R> Worker<S, R>
-where
-    S: for<'de> Deserialize<'de> + Serialize,
-    R: for<'de> Deserialize<'de> + Serialize,
+impl Worker
 {
     fn new(opts: WorkerOpts) -> Fallible<Self> {
         let (sock, childsock) = UnixStream::pair()?;
         let drop_privs : bool = !opts.privileged && nix::unistd::getuid().is_root();
         let child = process::Command::new("/proc/self/exe")
-            .args(&["multiproc-worker", &server_name])
+            .args(&["multiproc-worker"])
             .before_exec(move || {
                 let childsock = childsock.into_raw_fd();
                 if childsock != 3 {
-                    nix::unistd::dup2(childsock, 3).map_err(new_io_err)?;
+                    nix::unistd::dup2(childsock, 3).map_err(|e| new_io_err(e))?;
                 }
                 prctl_set_pdeathsig_term()?;
                 if drop_privs {
@@ -104,13 +100,13 @@ where
     }
 
     fn send(&self, msg: Message) -> Fallible<()> {
-        bincode::serialize_into(self.sock, msg)?;
+        bincode::serialize_into(self.sock, &msg)?;
         Ok(())
     }
 
     fn call(&self, msg: Message) -> Fallible<Message> {
-        bincode::serialize_into(self.sock, msg)?;
-        bincode::deserialize_from(self.sock)?
+        bincode::serialize_into(self.sock, &msg)?;
+        Ok(bincode::deserialize_from(self.sock)?)
     }
 }
 
@@ -119,24 +115,25 @@ struct WorkerImpl {
 }
 
 impl WorkerImpl {
-    fn new(sock: UnixStream) {
+    fn new(sock: UnixStream) -> Self {
         Self { sock, }
     }
 
     fn impl_testmessage(&self, msg: Vec<u8>) -> Fallible<()> {
         let mut msg : TestMessage = bincode::deserialize(&msg)?;
         msg.0 += 1;
-        msg.1.insert(0, "x");
-        bincode::serialize_into(self.sock, msg)?;
+        msg.1.insert(0, 'x');
+        bincode::serialize_into(self.sock, &msg)?;
+        Ok(())
     }
 
     fn run(&self) -> Fallible<()> {
         loop {
-            let msg = bincode::deserialize_from(self.sock, bincode::SizeLimit::Infinite)?
+            let msg = bincode::deserialize_from(self.sock)?;
             match msg {
                 Message::Terminate => return Ok(()),
                 Message::TestMessage(buf) => {
-                    impl_testmessage(buf)?;
+                    self.impl_testmessage(buf)?;
                 }
             }
         }
@@ -153,10 +150,16 @@ fn multiproc_run(argv: &Vec<String>) -> Fallible<()> {
         let worker = Worker::new(Default::default())?;
         for i in 0..5 {
             let s = format!("hello world {}", i);
-            let r = worker.call(Message::TestMessage(TestMessage(i, s.clone())))?;
+            let r = worker.call(Message::TestMessage(bincode::serialize(&TestMessage(i, s.clone()))?))?;
             println!("> ping");
-            assert_eq!(i, r.0);
-            assert_eq!(&s, r.1);
+            match r {
+                Message::TestMessage(m) => {
+                    let m : TestMessage = bincode::deserialize(&m)?;
+                    assert_eq!(i, m.0);
+                    assert_eq!(&s, &m.1);
+                }
+                _ => panic!("Unexpected message: {:?}", r)
+            }
             println!("< pong");
         }
         worker.send(Message::Terminate)?;
