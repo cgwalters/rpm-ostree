@@ -347,6 +347,8 @@ rpmostree_context_finalize (GObject *object)
   g_free (rctx->rojig_checksum);
   g_free (rctx->rojig_inputhash);
 
+  g_free (rctx->changelog_replacement);
+
   g_clear_object (&rctx->pkgcache_repo);
   g_clear_object (&rctx->ostreerepo);
   g_clear_pointer (&rctx->devino_cache, (GDestroyNotify)ostree_repo_devino_cache_unref);
@@ -528,6 +530,11 @@ void
 rpmostree_context_set_treefile (RpmOstreeContext *self, RORTreefile *treefile_rs)
 {
   self->treefile_rs = treefile_rs;
+  if (self->treefile_rs)
+    {
+      g_free (self->changelog_replacement);
+      self->changelog_replacement = ror_treefile_get_rpm_changelogs_remove (self->treefile_rs);
+    }
 }
 
 /* Use this if no packages will be installed, and we just want a "dummy" run.
@@ -2335,7 +2342,7 @@ start_async_import_one_package (RpmOstreeContext *self, DnfPackage *pkg,
   /* TODO - tweak the unpacker flags for containers */
   OstreeRepo *ostreerepo = get_pkgcache_repo (self);
   g_autoptr(RpmOstreeImporter) unpacker =
-    rpmostree_importer_new_take_fd (&fd, ostreerepo, pkg, flags,
+    rpmostree_importer_new_take_fd (&fd, self->changelog_replacement, ostreerepo, pkg, flags,
                                     self->sepolicy, error);
   if (!unpacker)
     return FALSE;
@@ -3278,7 +3285,7 @@ get_package_metainfo (RpmOstreeContext *self,
   if (!glnx_openat_rdonly (self->tmpdir.fd, path, TRUE, &metadata_fd, error))
     return FALSE;
 
-  return rpmostree_importer_read_metainfo (metadata_fd, out_header, NULL,
+  return rpmostree_importer_read_metainfo (metadata_fd, self->changelog_replacement, out_header, NULL,
                                            out_fi, error);
 }
 

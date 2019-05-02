@@ -52,6 +52,7 @@ struct _RpmOstreeContext {
   gboolean unprivileged;
   OstreeSePolicy *sepolicy;
   char *passwd_dir;
+  char *changelog_replacement;
   /* Used in async imports, not owned */
   GVariant *rojig_xattr_table;
   GHashTable *rojig_pkg_to_xattrs;

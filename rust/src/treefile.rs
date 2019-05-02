@@ -322,6 +322,7 @@ fn treefile_merge(dest: &mut TreeComposeConfig, src: &mut TreeComposeConfig) {
         documentation,
         boot_location,
         tmp_is_dir,
+        rpm_changelogs_remove,
         default_target,
         machineid_compat,
         releasever,
@@ -607,6 +608,9 @@ struct TreeComposeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "initramfs-args")]
     initramfs_args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "rpm-changelogs-remove")]
+    rpm_changelogs_remove: Option<String>,
 
     // Tree layout options
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1096,6 +1100,15 @@ mod ffi {
             .map(|v| v.as_ptr())
             .unwrap_or(ptr::null_mut())
     }
+
+    #[no_mangle]
+    pub extern "C" fn ror_treefile_get_rpm_changelogs_remove(tf: *mut Treefile) -> *mut libc::c_char {
+        let tf = ref_from_raw_ptr(tf);
+        tf.parsed.rpm_changelogs_remove
+            .as_ref()
+            .map(|v| std::ffi::CString::new(v.as_bytes()).unwrap().into_raw())
+            .unwrap_or(ptr::null_mut())
+    }    
 
     #[no_mangle]
     pub extern "C" fn ror_treefile_free(tf: *mut Treefile) {

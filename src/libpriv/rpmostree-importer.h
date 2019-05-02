@@ -48,18 +48,19 @@ typedef enum {
 
 RpmOstreeImporter*
 rpmostree_importer_new_take_fd (int                     *fd,
+                                const char              *changelog_replacement,
                                 OstreeRepo              *repo,
                                 DnfPackage              *pkg,
                                 RpmOstreeImporterFlags   flags,
                                 OstreeSePolicy          *sepolicy,
                                 GError                 **error);
-
 void rpmostree_importer_set_rojig_mode (RpmOstreeImporter *self,
                                         GVariant *xattr_table,
                                         GVariant *xattrs);
 
 gboolean
 rpmostree_importer_read_metainfo (int fd,
+                                  const char *changelog_replacement,
                                   Header *out_header,
                                   gsize *out_cpio_offset,
                                   rpmfi *out_fi,

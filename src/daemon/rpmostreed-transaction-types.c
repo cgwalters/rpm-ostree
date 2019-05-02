@@ -655,7 +655,7 @@ import_local_rpm (OstreeRepo    *repo,
   if (policy == NULL)
     return FALSE;
 
-  g_autoptr(RpmOstreeImporter) unpacker = rpmostree_importer_new_take_fd (fd, repo, NULL, 0, policy, error);
+  g_autoptr(RpmOstreeImporter) unpacker = rpmostree_importer_new_take_fd (fd, NULL, repo, NULL, 0, policy, error);
   if (unpacker == NULL)
     return FALSE;
 

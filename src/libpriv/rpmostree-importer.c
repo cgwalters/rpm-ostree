@@ -58,7 +58,7 @@ struct RpmOstreeImporter
   OstreeSePolicy *sepolicy;
   struct archive *archive;
   int fd;
-  Header hdr;
+  Header ret_header;
   rpmfi fi;
   off_t cpio_offset;
   GHashTable *rpmfi_overrides;
@@ -87,8 +87,8 @@ static void
 rpmostree_importer_finalize (GObject *object)
 {
   RpmOstreeImporter *self = (RpmOstreeImporter*)object;
-  if (self->hdr)
-    headerFree (self->hdr);
+  if (self->ret_header)
+    headerFree (self->ret_header);
   if (self->archive)
     archive_read_free (self->archive);
   if (self->fi)
@@ -132,6 +132,7 @@ rpmostree_importer_init (RpmOstreeImporter *self)
 
 gboolean
 rpmostree_importer_read_metainfo (int fd,
+                                  const char *changelog_replacement,
                                   Header *out_header,
                                   gsize *out_cpio_offset,
                                   rpmfi *out_fi,
@@ -178,6 +179,23 @@ rpmostree_importer_read_metainfo (int fd,
                     abspath);
       goto out;
     }
+
+  if (changelog_replacement)
+    {
+      headerDel (ret_header, RPMTAG_CHANGELOGTIME);
+      headerDel (ret_header, RPMTAG_CHANGELOGTEXT);
+      headerDel (ret_header, RPMTAG_CHANGELOGNAME);
+
+      uint32_t buildtime = (uint32_t) headerGetNumber (ret_header, RPMTAG_BUILDTIME);
+      headerPutUint32 (ret_header, RPMTAG_CHANGELOGTIME, &buildtime, 1);
+      headerPutString (ret_header, RPMTAG_CHANGELOGNAME, "unset-email");
+      headerPutString (ret_header, RPMTAG_CHANGELOGTEXT, changelog_replacement);      
+    }
+  else
+  {
+      g_assert_not_reached ();
+  }
+  
 
   ret_cpio_offset = Ftell (rpmfd);
 
@@ -250,6 +268,7 @@ build_rpmfi_overrides (RpmOstreeImporter *self)
  */
 RpmOstreeImporter *
 rpmostree_importer_new_take_fd (int                     *fd,
+                                const char              *changelog_replacement,
                                 OstreeRepo              *repo,
                                 DnfPackage              *pkg,
                                 RpmOstreeImporterFlags   flags,
@@ -257,7 +276,7 @@ rpmostree_importer_new_take_fd (int                     *fd,
                                 GError                 **error)
 {
   RpmOstreeImporter *ret = NULL;
-  g_auto(Header) hdr = NULL;
+  g_auto(Header) ret_header = NULL;
   rpmfi fi = NULL;
   struct archive *archive;
   gsize cpio_offset;
@@ -266,7 +285,7 @@ rpmostree_importer_new_take_fd (int                     *fd,
   if (archive == NULL)
     goto out;
 
-  if (!rpmostree_importer_read_metainfo (*fd, &hdr, &cpio_offset, &fi, error))
+  if (!rpmostree_importer_read_metainfo (*fd, changelog_replacement, &ret_header, &cpio_offset, &fi, error))
     goto out;
 
   ret = g_object_new (RPMOSTREE_TYPE_IMPORTER, NULL);
@@ -277,7 +296,7 @@ rpmostree_importer_new_take_fd (int                     *fd,
   ret->archive = g_steal_pointer (&archive);
   ret->flags = flags;
   ret->unpacking_as_nonroot = (getuid () != 0);
-  ret->hdr = g_steal_pointer (&hdr);
+  ret->ret_header = g_steal_pointer (&ret_header);
   ret->cpio_offset = cpio_offset;
   ret->pkg = pkg ? g_object_ref (pkg) : NULL;
   ret->opt_files = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
@@ -337,9 +356,9 @@ rpmostree_importer_get_ostree_branch (RpmOstreeImporter *self)
   if (!self->ostree_branch)
     {
       if (self->rojig_mode)
-        self->ostree_branch = rpmostree_get_rojig_branch_header (self->hdr);
+        self->ostree_branch = rpmostree_get_rojig_branch_header (self->ret_header);
       else
-        self->ostree_branch = rpmostree_get_cache_branch_header (self->hdr);
+        self->ostree_branch = rpmostree_get_cache_branch_header (self->ret_header);
     }
 
   return self->ostree_branch;
@@ -444,11 +463,11 @@ build_metadata_variant (RpmOstreeImporter *self,
   g_autofree char *nevra = rpmostree_importer_get_nevra (self);
   g_variant_builder_add (&metadata_builder, "{sv}", "rpmostree.nevra",
                          g_variant_new ("(sstsss)", nevra,
-                                        headerGetString (self->hdr, RPMTAG_NAME),
-                                        headerGetNumber (self->hdr, RPMTAG_EPOCH),
-                                        headerGetString (self->hdr, RPMTAG_VERSION),
-                                        headerGetString (self->hdr, RPMTAG_RELEASE),
-                                        headerGetString (self->hdr, RPMTAG_ARCH)));
+                                        headerGetString (self->ret_header, RPMTAG_NAME),
+                                        headerGetNumber (self->ret_header, RPMTAG_EPOCH),
+                                        headerGetString (self->ret_header, RPMTAG_VERSION),
+                                        headerGetString (self->ret_header, RPMTAG_RELEASE),
+                                        headerGetString (self->ret_header, RPMTAG_ARCH)));
 
   /* The current sepolicy that was used to label the unpacked files is important
    * to record. It will help us during future overlays to determine whether the
@@ -908,7 +927,7 @@ import_rpm_to_repo (RpmOstreeImporter *self,
   g_auto(GLnxTmpDir) tmpdir = { 0, };
   if (self->tmpfiles_d->len > 0)
     {
-      g_autofree char *pkgname = headerGetAsString (self->hdr, RPMTAG_NAME);
+      g_autofree char *pkgname = headerGetAsString (self->ret_header, RPMTAG_NAME);
 
       if (!glnx_mkdtemp ("rpm-ostree-import.XXXXXX", 0700, &tmpdir, error))
         return FALSE;
@@ -944,7 +963,7 @@ import_rpm_to_repo (RpmOstreeImporter *self,
    * same RPM always yields the same checksum, which is a useful property to
    * have (barring changes in the unpacker, in which case we wouldn't want the
    * same checksum anyway). */
-  guint64 buildtime = headerGetNumber (self->hdr, RPMTAG_BUILDTIME);
+  guint64 buildtime = headerGetNumber (self->ret_header, RPMTAG_BUILDTIME);
 
   if (!ostree_repo_write_commit_with_time (repo, NULL, "", "", metadata,
                                            OSTREE_REPO_FILE (root), buildtime,
@@ -966,7 +985,7 @@ rpmostree_importer_run (RpmOstreeImporter *self,
   g_autofree char *csum = NULL;
   if (!import_rpm_to_repo (self, &csum, cancellable, error))
     {
-      g_autofree char *name = headerGetAsString (self->hdr, RPMTAG_NAME);
+      g_autofree char *name = headerGetAsString (self->ret_header, RPMTAG_NAME);
       g_prefix_error (error, "Importing package %s: ", name);
       return FALSE;
     }
@@ -1017,9 +1036,9 @@ rpmostree_importer_run_async_finish (RpmOstreeImporter  *self,
 char *
 rpmostree_importer_get_nevra (RpmOstreeImporter *self)
 {
-  if (self->hdr == NULL)
+  if (self->ret_header == NULL)
     return NULL;
-  return rpmostree_header_custom_nevra_strdup (self->hdr,
+  return rpmostree_header_custom_nevra_strdup (self->ret_header,
                                                PKG_NEVRA_FLAGS_NAME |
                                                PKG_NEVRA_FLAGS_EPOCH_VERSION_RELEASE |
                                                PKG_NEVRA_FLAGS_ARCH);
