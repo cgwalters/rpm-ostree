@@ -343,6 +343,8 @@ rpmostree_context_finalize (GObject *object)
   g_clear_object (&rctx->spec);
   g_clear_object (&rctx->dnfctx);
 
+  g_clear_object (&rctx->treefile_json);
+
   g_clear_object (&rctx->rojig_pkg);
   g_free (rctx->rojig_checksum);
   g_free (rctx->rojig_inputhash);
@@ -530,6 +532,18 @@ void
 rpmostree_context_set_treefile (RpmOstreeContext *self, RORTreefile *treefile_rs)
 {
   self->treefile_rs = treefile_rs;
+  if (!self->treefile_rs)
+    return;
+
+  g_autoptr(JsonParser) parser = json_parser_new ();
+  const char *serialized = ror_treefile_get_json_string (self->treefile_rs);
+  g_autoptr(GError) local_error = NULL;
+  if (!json_parser_load_from_data (parser, serialized, -1, &local_error))
+    g_error ("%s", local_error->message);
+  g_set_object (&self->treefile_json, parser);
+  JsonNode *rootval = json_parser_get_root (self->treefile_json);
+  g_assert (JSON_NODE_HOLDS_OBJECT (rootval));
+  self->treefile_json_root = json_node_get_object (rootval);
 }
 
 /* Use this if no packages will be installed, and we just want a "dummy" run.
@@ -2024,6 +2038,49 @@ rpmostree_context_prepare (RpmOstreeContext *self,
   HyGoal goal = dnf_context_get_goal (dnfctx);
   GLNX_HASH_TABLE_FOREACH_V (local_pkgs_to_install, DnfPackage*, pkg)
     hy_goal_install (goal,  pkg);
+
+  /* Package queries come from treefiles */
+  if (self->treefile_rs)
+    {
+      g_assert (self->treefile_json_root);
+      JsonNode *node = json_object_get_member (self->treefile_json_root, "packages-query");
+      if (node != NULL)
+        {
+          JsonArray *ja = json_node_get_array (node);
+          g_assert (ja);
+          guint len = json_array_get_length (ja);
+          for (guint i = 0; i < len; i++)
+            {
+              JsonObject *q = json_array_get_object_element (ja, i);
+              JsonArray *pkgs = json_object_get_array_member (q, "packages");
+              g_assert (pkgs);
+              const char *repo = NULL;
+              g_assert (_rpmostree_jsonutil_object_get_optional_string_member (q, "repo", &repo, NULL));
+              const guint pkglen = json_array_get_length (pkgs);
+              for (guint j = 0; j < pkglen; j++)
+                {
+                  const char *pkgname = json_array_get_string_element (pkgs, j);
+                  g_assert (pkgname);
+                  hy_autoquery HyQuery query = hy_query_create (sack);
+                  if (repo)
+                    hy_query_filter (query, HY_PKG_REPONAME, HY_EQ, repo);
+                  hy_query_filter (query, HY_PKG_NAME, HY_EQ, pkgname);
+                  hy_query_filter_latest_per_arch (query, TRUE);
+                  GPtrArray *pkglist = hy_query_run (query);
+                  if (pkglist->len == 0)
+                    {
+                      if (repo != NULL)
+                        return glnx_throw (error, "No matches for package '%s' in repo '%s'", pkgname, repo);
+                      else
+                        return glnx_throw (error, "No matches for package '%s'", pkgname);
+                    }
+                  else if (pkglist->len != 1)
+                    return glnx_throw (error, "Unexpected multiple matches for package name '%s'", pkgname);
+                  hy_goal_install (goal, pkglist->pdata[0]);
+                }
+            }
+        }
+    }
 
   /* And finally, handle repo packages to install */
   g_autoptr(GPtrArray) missing_pkgs = NULL;
@@ -3806,7 +3863,7 @@ process_ostree_layers (RpmOstreeContext *self,
 {
   if (!self->treefile_rs)
     return TRUE;
-  
+
   g_auto(GStrv) layers = ror_treefile_get_ostree_layers (self->treefile_rs);
   g_auto(GStrv) override_layers = ror_treefile_get_ostree_override_layers (self->treefile_rs);
   const size_t n = (layers ? g_strv_length (layers) : 0) + (override_layers ? g_strv_length (override_layers) : 0);

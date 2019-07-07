@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <json-glib/json-glib.h>
+
 #include "libglnx.h"
 #include "rpmostree-rojig-core.h"
 #include "rpmostree-core.h"
@@ -31,6 +33,8 @@ struct _RpmOstreeContext {
   gboolean is_system;
   RpmOstreeTreespec *spec;
   RORTreefile *treefile_rs; /* For composes for now */
+  JsonParser *treefile_json;
+  JsonObject *treefile_json_root; /* Unowned */
   gboolean empty;
 
   /* rojig-mode data */

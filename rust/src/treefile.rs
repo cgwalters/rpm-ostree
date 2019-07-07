@@ -355,6 +355,7 @@ fn treefile_merge(dest: &mut TreeComposeConfig, src: &mut TreeComposeConfig) {
     merge_vecs!(
         repos,
         packages,
+        package_queries,
         ostree_layers,
         ostree_override_layers,
         install_langs,
@@ -641,6 +642,12 @@ enum Include {
     Multiple(Vec<String>)
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct PackagesQuery {
+    repo: Option<String>,
+    packages: Vec<String>,
+}
+
 // Because of how we handle includes, *everything* here has to be
 // Option<T>.  The defaults live in the code (e.g. machineid-compat defaults
 // to `true`).
@@ -668,6 +675,8 @@ struct TreeComposeConfig {
     // Core content
     #[serde(skip_serializing_if = "Option::is_none")]
     packages: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package_queries: Option<Vec<PackagesQuery>>,
     // Deprecated option
     #[serde(skip_serializing_if = "Option::is_none")]
     bootstrap_packages: Option<Vec<String>>,
@@ -1275,7 +1284,6 @@ mod ffi {
         }
         ret.to_glib_full()
     }
-
 
     #[no_mangle]
     pub extern "C" fn ror_treefile_get_rojig_spec_path(tf: *mut Treefile) -> *const libc::c_char {
