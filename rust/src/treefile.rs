@@ -677,6 +677,10 @@ struct TreeComposeConfig {
     #[serde(rename = "exclude-packages")]
     exclude_packages: Option<Vec<String>>,
 
+    // Extensions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extensions: Option<Vec<String>>,
+
     // Content installation opts
     #[serde(skip_serializing_if = "Option::is_none")]
     container: Option<bool>,

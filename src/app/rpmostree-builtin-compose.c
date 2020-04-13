@@ -44,6 +44,9 @@ static RpmOstreeCommand compose_subcommands[] = {
   { "rojig", RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD | RPM_OSTREE_BUILTIN_FLAG_HIDDEN,
     "EXPERIMENTAL: Build a rojig RPM from a treefile, output to a local rpm-md repo",
     rpmostree_compose_builtin_rojig },
+  { "extensions", RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD | RPM_OSTREE_BUILTIN_FLAG_HIDDEN,
+    "EXPERIMENTAL: Generate an extensions directory",
+    rpmostree_compose_builtin_extensions },
   { NULL, 0, NULL, NULL }
 };
 

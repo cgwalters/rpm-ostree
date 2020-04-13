@@ -9,6 +9,8 @@ mod ffiutil;
 
 mod cliwrap;
 pub use cliwrap::*;
+mod composeextensions;
+pub use self::composeextensions::*;
 mod composepost;
 pub use self::composepost::*;
 mod history;

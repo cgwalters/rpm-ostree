@@ -68,6 +68,7 @@ static gboolean opt_cache_only;
 static gboolean opt_unified_core;
 static char *opt_proxy;
 static char *opt_output_repodata_dir;
+static char *opt_output_extensions_dir;
 static char **opt_metadata_strings;
 static char **opt_metadata_json;
 static char *opt_repo;
@@ -99,6 +100,7 @@ static GOptionEntry install_option_entries[] = {
   { "proxy", 0, 0, G_OPTION_ARG_STRING, &opt_proxy, "HTTP proxy", "PROXY" },
   { "dry-run", 0, 0, G_OPTION_ARG_NONE, &opt_dry_run, "Just print the transaction and exit", NULL },
   { "output-repodata-dir", 0, 0, G_OPTION_ARG_STRING, &opt_output_repodata_dir, "Save downloaded repodata in DIR", "DIR" },
+  { "output-extensions-dir", 0, 0, G_OPTION_ARG_STRING, &opt_output_extensions_dir, "Save downloaded extensions in DIR", "DIR" },
   { "print-only", 0, 0, G_OPTION_ARG_NONE, &opt_print_only, "Just expand any includes and print treefile", NULL },
   { "touch-if-changed", 0, 0, G_OPTION_ARG_STRING, &opt_touch_if_changed, "Update the modification time on FILE if a new commit was created", "FILE" },
   { "workdir", 0, 0, G_OPTION_ARG_STRING, &opt_workdir, "Working directory", "WORKDIR" },
