@@ -119,6 +119,10 @@ static RpmOstreeCommand commands[] = {
                      RPM_OSTREE_BUILTIN_FLAG_REQUIRES_ROOT |
                      RPM_OSTREE_BUILTIN_FLAG_HIDDEN,
     NULL, rpmostree_builtin_coreos_rootfs },
+  { "ex-boot-update", RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD |
+                      RPM_OSTREE_BUILTIN_FLAG_REQUIRES_ROOT |
+                      RPM_OSTREE_BUILTIN_FLAG_HIDDEN,
+    NULL, rpmostree_builtin_boot_update },
   { "testutils", RPM_OSTREE_BUILTIN_FLAG_LOCAL_CMD |
                  RPM_OSTREE_BUILTIN_FLAG_HIDDEN,
     NULL, rpmostree_builtin_testutils },

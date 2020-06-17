@@ -15,6 +15,8 @@ mod history;
 pub use self::history::*;
 mod coreos_rootfs;
 pub use self::coreos_rootfs::*;
+mod boot_update;
+pub use self::boot_update::*;
 mod journal;
 pub use self::journal::*;
 mod progress;

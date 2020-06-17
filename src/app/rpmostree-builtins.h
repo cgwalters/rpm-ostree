@@ -53,6 +53,7 @@ BUILTINPROTO(kargs);
 BUILTINPROTO(reset);
 BUILTINPROTO(start_daemon);
 BUILTINPROTO(coreos_rootfs);
+BUILTINPROTO(boot_update);
 BUILTINPROTO(testutils);
 BUILTINPROTO(ex);
 BUILTINPROTO(finalize_deployment);

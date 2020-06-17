@@ -89,6 +89,10 @@ if test -n "${OT_TESTS_DEBUG:-}"; then
     set -x
 fi
 
+runv() {
+    (set -x && "$@")
+}
+
 check_root_test ()
 {
     if test "$(id -u)" != "0"; then
