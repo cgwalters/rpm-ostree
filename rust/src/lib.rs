@@ -7,6 +7,8 @@
 // pub(crate) utilities
 mod ffiutil;
 
+mod bootupd_wrap;
+pub use bootupd_wrap::*;
 mod cliwrap;
 pub use cliwrap::*;
 mod composepost;
