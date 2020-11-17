@@ -18,3 +18,12 @@ extern "C" {
         gerror: *mut *mut glib_sys::GError,
     ) -> libc::c_int;
 }
+
+// From rpmostree-core.h
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum RefspecType {
+    Ostree = 0,
+    Rojig = 1,
+    Checksum = 2,
+}

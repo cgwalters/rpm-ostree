@@ -42,6 +42,8 @@ use std::ptr;
  * outlive the function call.
  */
 
+use glib::translate::*;
+
 /// View a C "bytestring" (NUL terminated) as a Rust byte array.
 /// Panics if `s` is `NULL`.
 pub(crate) fn ffi_view_bytestring<'a>(s: *const libc::c_char) -> &'a [u8] {
@@ -112,6 +114,39 @@ pub(crate) fn ffi_view_openat_dir_option(fd: libc::c_int) -> Option<openat::Dir>
 pub(crate) fn ref_from_raw_ptr<T>(p: *mut T) -> &'static mut T {
     assert!(!p.is_null());
     unsafe { &mut *p }
+}
+
+pub(crate) fn btreeset_to_hashtable(b: &std::collections::BTreeSet<String>) -> *mut glib_sys::GHashTable {
+    unsafe {
+        let ptr = glib_sys::g_hash_table_new_full(
+            Some(glib_sys::g_str_hash),
+            Some(glib_sys::g_str_equal),
+            Some(glib_sys::g_free),
+            None,
+        );
+        for k in b {
+            let k: *mut libc::c_char = k.to_glib_full();
+            glib_sys::g_hash_table_add(ptr, k as *mut _);
+        }
+        ptr
+    }
+}
+
+pub(crate) fn btreemap_to_hashtable(b: &std::collections::BTreeMap<String, String>) -> *mut glib_sys::GHashTable {
+    unsafe {
+        let ptr = glib_sys::g_hash_table_new_full(
+            Some(glib_sys::g_str_hash),
+            Some(glib_sys::g_str_equal),
+            Some(glib_sys::g_free),
+            Some(glib_sys::g_free),
+        );
+        for (k, v) in b {
+            let k: *mut libc::c_char = k.to_glib_full();
+            let v: *mut libc::c_char = v.to_glib_full();
+            glib_sys::g_hash_table_insert(ptr, k as *mut _, v as *mut _);
+        }
+        ptr
+    }
 }
 
 // Functions to map Rust's Error into the "GError convention":

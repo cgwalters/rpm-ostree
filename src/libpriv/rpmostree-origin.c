@@ -366,43 +366,6 @@ rpmostree_origin_dup_keyfile (RpmOstreeOrigin *origin)
   return keyfile_dup (origin->kf);
 }
 
-char *
-rpmostree_origin_get_string (RpmOstreeOrigin *origin,
-                             const char *section,
-                             const char *value)
-{
-  return g_key_file_get_string (origin->kf, section, value, NULL);
-}
-
-RpmOstreeOrigin*
-rpmostree_origin_ref (RpmOstreeOrigin *origin)
-{
-  g_assert (origin);
-  origin->refcount++;
-  return origin;
-}
-
-void
-rpmostree_origin_unref (RpmOstreeOrigin *origin)
-{
-  g_assert (origin);
-  g_assert_cmpint (origin->refcount, >, 0);
-  origin->refcount--;
-  if (origin->refcount > 0)
-    return;
-  g_key_file_unref (origin->kf);
-  g_free (origin->cached_refspec);
-  g_free (origin->cached_rojig_version);
-  g_free (origin->cached_unconfigured_state);
-  g_strfreev (origin->cached_initramfs_args);
-  g_clear_pointer (&origin->cached_packages, g_hash_table_unref);
-  g_clear_pointer (&origin->cached_local_packages, g_hash_table_unref);
-  g_clear_pointer (&origin->cached_overrides_local_replace, g_hash_table_unref);
-  g_clear_pointer (&origin->cached_overrides_remove, g_hash_table_unref);
-  g_clear_pointer (&origin->cached_initramfs_etc_files, g_hash_table_unref);
-  g_free (origin);
-}
-
 static void
 update_string_list_from_hash_table (GKeyFile *kf,
                                     const char *group,
