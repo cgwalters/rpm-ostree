@@ -8,6 +8,8 @@
 
 // pub(crate) utilities
 mod ffiutil;
+mod cxx_bridge_gobject;
+pub use cxx_bridge_gobject::*;
 mod includes;
 
 mod core;
@@ -21,6 +23,22 @@ mod ffi {
 
         fn prepare_tempetc_guard(rootfs: i32) -> Result<Box<TempEtcGuard>>;
         fn undo(self: &TempEtcGuard) -> Result<()>;
+    }
+
+    extern "C++" {
+        include!("src/libpriv/rpmostree-cxxrs-prelude.h");
+
+        type OstreeRepo = crate::FFIOstreeRepo;
+        type OstreeDeployment = crate::FFIOstreeDeployment;
+    }
+
+    // origin.rs
+    extern "Rust" {
+        type Origin;
+
+        fn origin_parse_deployment(deployment: Pin<&mut OstreeDeployment>) -> Result<Box<Origin>>;
+        fn is_rojig(&self) -> bool;
+        fn get_override_local_pkgs(&self) -> Vec<String>;
     }
 }
 
@@ -38,8 +56,10 @@ mod lockfile;
 pub use self::lockfile::*;
 mod livefs;
 pub use self::livefs::*;
+mod origin;
 mod ostree_diff;
 mod ostree_utils;
+pub use self::origin::*;
 mod progress;
 pub use self::progress::*;
 mod testutils;
