@@ -57,7 +57,7 @@ rpmostree_origin_dup (RpmOstreeOrigin *origin);
 void
 rpmostree_origin_remove_transient_state (RpmOstreeOrigin *origin);
 
-const char *
+char *
 rpmostree_origin_get_refspec (RpmOstreeOrigin *origin);
 
 void
@@ -71,7 +71,7 @@ rpmostree_origin_get_full_refspec (RpmOstreeOrigin *origin,
 
 gboolean rpmostree_origin_is_rojig (RpmOstreeOrigin *origin);
 
-const char *
+char *
 rpmostree_origin_get_rojig_version (RpmOstreeOrigin *origin);
 
 GVariant *
