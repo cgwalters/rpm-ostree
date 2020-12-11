@@ -216,6 +216,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "cxx"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "621acfac6ad852f743d5eab14ad8d87b112c4d7f0091489226cbe3df305d259b"
+dependencies = [
+ "cc",
+ "cxxbridge-flags",
+ "cxxbridge-macro",
+ "link-cplusplus",
+]
+
+[[package]]
+name = "cxxbridge-flags"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98f92732183d1a91c7e7f69a6fda6ba2a503ee038e21eeec451058dd1978ce94"
+
+[[package]]
+name = "cxxbridge-macro"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e73db50ebc97680b35e4952da2953271defd4a6e7c2d8f961825e0bfbf6a053"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "drop_bomb"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -562,6 +591,15 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "link-cplusplus"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f96aa785c87218ec773df6c510af203872b34e2df2cf47d6e908e5f36231e354"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -949,6 +987,7 @@ dependencies = [
  "chrono",
  "clap",
  "curl",
+ "cxx",
  "envsubst",
  "gio",
  "gio-sys",
