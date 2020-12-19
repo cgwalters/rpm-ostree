@@ -31,8 +31,12 @@ mod ffi {
     extern "Rust" {
         fn download_to_fd(url: &str) -> Result<i32>;
     }
-}
 
+    // rpmutils.rs
+    extern "Rust" {
+        fn cache_branch_to_nevra(nevra: &str) -> String;
+    }
+}
 
 mod cliwrap;
 pub use cliwrap::*;
@@ -54,6 +58,8 @@ mod ostree_diff;
 mod ostree_utils;
 mod progress;
 pub use self::progress::*;
+mod rpmutils;
+pub(crate) use self::rpmutils::*;
 mod testutils;
 pub use self::testutils::*;
 mod treefile;

@@ -1315,49 +1315,6 @@ rpmostree_nevra_to_cache_branch (const char *nevra,
   return TRUE;
 }
 
-/* translates cachebranch back to nevra (inverse of rpmostree_cache_branch_to_nevra) */
-char *
-rpmostree_cache_branch_to_nevra (const char *cachebranch)
-{
-  GString *r = g_string_new ("");
-  const char *p;
-
-  g_assert (g_str_has_prefix (cachebranch, "rpmostree/pkg/"));
-  cachebranch += strlen ("rpmostree/pkg/");
-
-  for (p = cachebranch; *p; p++)
-    {
-      char c = *p;
-
-      if (c != '_')
-        {
-          if (c == '/')
-            g_string_append_c (r, '-');
-          else
-            g_string_append_c (r, c);
-          continue;
-        }
-
-      p++;
-      c = *p;
-
-      if (c == '_')
-        {
-          g_string_append_c (r, c);
-          continue;
-        }
-
-      if (!*p || !*(p+1))
-        break;
-
-      const char h[3] = { *p, *(p+1) };
-      g_string_append_c (r, g_ascii_strtoull (h, NULL, 16));
-      p++;
-    }
-
-  return g_string_free (r, FALSE);
-}
-
 /* Quote/squash all non-(alphanumeric plus `.` and `-`); this
  * is used to map RPM package NEVRAs into ostree branch names.
  */
