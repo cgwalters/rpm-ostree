@@ -36,6 +36,12 @@ mod ffi {
     extern "Rust" {
         fn cache_branch_to_nevra(nevra: &str) -> String;
     }
+
+    // rpmostree-rpm-util.h
+    unsafe extern "C++" {
+        include!("rpmostree-rpm-util.h");
+        fn nevra_to_cache_branch(nevra: &CxxString) -> Result<UniquePtr<CxxString>>;
+    }
 }
 
 mod cliwrap;

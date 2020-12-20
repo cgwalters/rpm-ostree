@@ -23,6 +23,9 @@
 #include "rpmostree-rpm-util.h"
 #include "rpmostree-output.h"
 #include "rpmostree-core.h"
+#include <exception>
+#include <stdexcept>
+#include <string>
 
 #include <inttypes.h>
 #include <fnmatch.h>
@@ -1292,27 +1295,28 @@ rpmostree_decompose_nevra (const char  *nevra,
 }
 
 /* translates NEVRA to its cache branch */
-gboolean
-rpmostree_nevra_to_cache_branch (const char *nevra,
-                                 char      **cache_branch,
-                                 GError    **error)
+namespace rpmostreecxx {
+std::unique_ptr<std::string>
+nevra_to_cache_branch (const std::string &nevra)
 {
   /* It's cumbersome, but we have to decompose the NEVRA and the rebuild it into a cache
    * branch. Something something Rust slices... */
-
+  g_autoptr(GError) local_error = NULL;
   g_autofree char *name = NULL;
   guint64 epoch = 0;
   g_autofree char *version = NULL;
   g_autofree char *release = NULL;
   g_autofree char *arch = NULL;
 
-  if (!rpmostree_decompose_nevra (nevra, &name, &epoch, &version, &release, &arch, error))
-    return FALSE;
+  if (!rpmostree_decompose_nevra (nevra.c_str(), &name, &epoch, &version, &release, &arch, &local_error))
+    throw std::runtime_error (local_error->message);
 
   g_autofree char *evr = rpmostree_custom_nevra_strdup (name, epoch, version, release, arch,
                                                         PKG_NEVRA_FLAGS_EVR);
-  *cache_branch = rpmostree_get_cache_branch_for_n_evr_a (name, evr, arch);
-  return TRUE;
+  g_autofree char *branch = rpmostree_get_cache_branch_for_n_evr_a (name, evr, arch);
+  auto ret = std::string (branch);
+  return std::make_unique<std::string>(ret);
+}
 }
 
 /* Quote/squash all non-(alphanumeric plus `.` and `-`); this

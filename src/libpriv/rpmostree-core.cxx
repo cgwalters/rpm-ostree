@@ -1039,9 +1039,7 @@ rpmostree_pkgcache_find_pkg_header (OstreeRepo    *pkgcache,
                                     GCancellable  *cancellable,
                                     GError       **error)
 {
-  g_autofree char *cache_branch = NULL;
-  if (!rpmostree_nevra_to_cache_branch (nevra, &cache_branch, error))
-    return FALSE;
+  auto cachebranch = rpmostreecxx::nevra_to_cache_branch (nevra);
 
   if (expected_sha256 != NULL)
     {
@@ -1049,7 +1047,7 @@ rpmostree_pkgcache_find_pkg_header (OstreeRepo    *pkgcache,
       g_autoptr(GVariant) commit = NULL;
       g_autofree char *actual_sha256 = NULL;
 
-      if (!ostree_repo_resolve_rev (pkgcache, cache_branch, TRUE, &commit_csum, error))
+      if (!ostree_repo_resolve_rev (pkgcache, cachebranch->c_str(), TRUE, &commit_csum, error))
         return FALSE;
 
       if (!ostree_repo_load_commit (pkgcache, commit_csum, &commit, NULL, error))
@@ -1062,7 +1060,7 @@ rpmostree_pkgcache_find_pkg_header (OstreeRepo    *pkgcache,
         return glnx_throw (error, "Checksum mismatch for package %s", nevra);
     }
 
-  return get_header_variant (pkgcache, cache_branch, out_header, cancellable, error);
+  return get_header_variant (pkgcache, cachebranch->c_str(), out_header, cancellable, error);
 }
 
 static gboolean

@@ -240,3 +240,10 @@ GPtrArray *
 rpmostree_get_enabled_rpmmd_repos (DnfContext *dnfctx, DnfRepoEnabled enablement);
 
 G_END_DECLS
+
+#ifdef __cplusplus
+#include <memory>
+namespace rpmostreecxx {
+  std::unique_ptr<std::string> nevra_to_cache_branch(const std::string &nevra);
+}
+#endif
