@@ -21,6 +21,7 @@
 #include "config.h"
 
 #include "rpmostree-rpm-util.h"
+#include "rpmostree-util.h"
 #include "rpmostree-output.h"
 #include "rpmostree-core.h"
 #include <exception>
@@ -1309,7 +1310,7 @@ nevra_to_cache_branch (const std::string &nevra)
   g_autofree char *arch = NULL;
 
   if (!rpmostree_decompose_nevra (nevra.c_str(), &name, &epoch, &version, &release, &arch, &local_error))
-    throw std::runtime_error (local_error->message);
+    util::throw_gerror(local_error);
 
   g_autofree char *evr = rpmostree_custom_nevra_strdup (name, epoch, version, release, arch,
                                                         PKG_NEVRA_FLAGS_EVR);

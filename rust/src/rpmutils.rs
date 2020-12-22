@@ -62,6 +62,12 @@ mod test {
     fn test_one_cache_branch_to_nevra(b: &str, exp_nevra: &str) {
         let nevra = cache_branch_to_nevra(b);
         assert_eq!(nevra, exp_nevra);
+        // FIXME - to enable this we need to have the Rust build link
+        // to our internal library, which requires entangling the two
+        // build systems.
+        // cxx::let_cxx_string!(cxx_exp_nevra = exp_nevra);
+        // let actual_branch = crate::ffi::nevra_to_cache_branch(&cxx_exp_nevra).expect("nevra");
+        // assert_eq!(b, actual_branch.to_string_lossy());
     }
 
     #[test]
