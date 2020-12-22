@@ -84,11 +84,14 @@ src/%.c: src/%.gperf Makefile
 	$(AM_V_GPERF)$(GPERF) < $< > $@.tmp && mv $@.tmp $@
 
 # Also we now use cxx.rs
+noinst_LTLIBRARIES += librpmostreecxxrs.la
 rpmostree-cxxrs.h: rust/src/lib.rs
 	$(AM_V_GEN) cxxbridge rust/src/lib.rs --header > $@
 rpmostree-cxxrs.cxx: rust/src/lib.rs
 	$(AM_V_GEN) cxxbridge --include rpmostree-cxxrs.h rust/src/lib.rs > $@
-cxxrs_sources = rpmostree-cxxrs.h rpmostree-cxxrs.cxx
-librpmostreepriv_sources += $(cxxrs_sources)
+librpmostreecxxrs_la_SOURCES = rpmostree-cxxrs.h rpmostree-cxxrs.cxx
+# Suppress missing-declarations because https://github.com/dtolnay/cxx/issues/590
+librpmostreecxxrs_la_CXXFLAGS = $(AM_CXXFLAGS) $(rpmostree_common_cflags) -Wno-missing-declarations
+librpmostreecxxrs_la_LIBADD = -lstdc++
 BUILT_SOURCES += $(cxxrs_sources)
 GITIGNOREFILES += $(cxxrs_sources)
