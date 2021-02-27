@@ -23,6 +23,7 @@
 #include "ostree.h"
 #include "rpmostree-builtin-types.h"
 #include "rpmostree-clientlib.h"
+#include "rpmostree-cxxrs.h"
 
 G_BEGIN_DECLS
 
@@ -60,6 +61,10 @@ BUILTINPROTO(ex);
 BUILTINPROTO(finalize_deployment);
 
 #undef BUILTINPROTO
+
+namespace rpmostreecxx {
+    void app_require_root(void);
+}
 
 gboolean
 rpmostree_option_context_parse (GOptionContext *context,
