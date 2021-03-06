@@ -22,6 +22,8 @@ use std::process::Command;
 
 /// GVariant `s`: Choose a specific commit
 pub(crate) const OPT_TARGET: &str = "target";
+/// GVariant `b`: Enable changing or removing packages(+files).
+pub(crate) const OPT_REPLACE: &str = "replace";
 
 /// The directory where ostree stores transient per-deployment state.
 /// This is currently semi-private to ostree; we should add an API to
