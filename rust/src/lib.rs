@@ -416,6 +416,7 @@ mod passwd;
 use passwd::*;
 mod console_progress;
 pub(crate) use self::console_progress::*;
+mod progress;
 mod scripts;
 pub(crate) use self::scripts::*;
 mod rpmutils;
