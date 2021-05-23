@@ -8,21 +8,39 @@ use crate::cxxrsutil::*;
 use crate::ffi::{
     OverrideReplacementSource, OverrideReplacementType, ParsedRevision, ParsedRevisionKind,
 };
-use anyhow::{anyhow, format_err, Result};
+use anyhow::{anyhow, format_err, Context, Result};
 use cap_std::fs::Dir;
+use cap_std::io_lifetimes::{IntoSocketlike, OwnedFd, OwnedSocketlike};
 use cap_std_ext::cap_std;
 use cap_std_ext::dirext::CapStdExtDirExt;
 use fn_error_context::context;
 use glib::prelude::*;
+use once_cell::sync::Lazy;
 use ostree_ext::{gio, glib, ostree};
-use rustix::fd::BorrowedFd;
+use rustix::fd::{BorrowedFd, FromRawFd};
 use rustix::fs::MetadataExt;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Mutex;
+use tokio::sync::oneshot::Sender;
 
 const RPM_OSTREED_COMMIT_VERIFICATION_CACHE: &str = "rpm-ostree/gpgcheck-cache";
+
+// Messages sent across the socket
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum SocketMessage {
+    ClientHello { selfid: String },
+    ServerOk,
+    ServerError { msg: String },
+}
+
+impl SocketMessage {
+    // Maximum size of a message.
+    pub(crate) const BUFSIZE: usize = 8192;
+}
 
 /// Validate basic assumptions on daemon startup.
 pub(crate) fn daemon_sanitycheck_environment(sysroot: &crate::FFIOstreeSysroot) -> CxxResult<()> {
@@ -129,6 +147,139 @@ fn deployment_populate_variant_origin(
     }
 
     Ok(())
+}
+
+pub(crate) fn write_message(conn: &OwnedFd, message: SocketMessage) -> Result<()> {
+    let sendbuf = serde_json::to_vec(&message)?;
+    rustix::net::send(conn, &sendbuf, rustix::net::SendFlags::empty())?;
+    Ok(())
+}
+
+pub(crate) fn recv_message(conn: &OwnedFd) -> Result<SocketMessage> {
+    let mut buf = [0u8; SocketMessage::BUFSIZE];
+    let n = rustix::net::recv(&conn, &mut buf, rustix::net::RecvFlags::empty())?;
+    if n == SocketMessage::BUFSIZE {
+        anyhow::bail!("Buffer filled to {n} bytes when reading");
+    }
+    assert!(n < SocketMessage::BUFSIZE);
+    let buf = &buf[0..n];
+    let msg: SocketMessage = serde_json::from_slice(buf).context("Parsing client message")?;
+    Ok(msg)
+}
+
+fn client_hello(client: OwnedSocketlike, e: anyhow::Result<()>) -> Result<()> {
+    let msg = recv_message(&client)?;
+    let reply = match msg {
+        SocketMessage::ClientHello { selfid } => {
+            let myid = crate::core::self_id()?;
+            if selfid != myid {
+                // For now, make this not an error
+                tracing::warn!("Client reported id: {selfid} different from mine: {myid}");
+            }
+            match e {
+                Ok(()) => SocketMessage::ServerOk,
+                Err(e) => SocketMessage::ServerError {
+                    msg: format!("{e}"),
+                },
+            }
+        }
+        o => SocketMessage::ServerError {
+            msg: format!("Unexpected message: {o:?}"),
+        },
+    };
+    write_message(&client, reply).context("Writing client reply")?;
+    tracing::debug!("Acknowleged client");
+    Ok(())
+}
+
+static SHUTDOWN_SIGNAL: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
+
+fn run_acknowledgement_worker(listener: OwnedSocketlike) {
+    tracing::debug!("Processing clients...");
+    loop {
+        let sock = match rustix::net::accept(&listener) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to accept client: {e}");
+                continue;
+            }
+        };
+        std::thread::spawn(move || {
+            if let Err(e) = client_hello(sock.into_socketlike(), Ok(())) {
+                tracing::warn!("error acknowledging client: {e}");
+            }
+        });
+    }
+}
+
+/// Ensure all asynchronous tasks in this Rust half of the daemon code are stopped.
+/// Called from C++.
+pub(crate) fn daemon_terminate() {
+    if let Some(chan) = (*SHUTDOWN_SIGNAL).lock().unwrap().take() {
+        let _ = chan.send(());
+    }
+}
+
+fn process_one_client(listener: OwnedSocketlike, e: anyhow::Error) -> Result<()> {
+    let incoming = rustix::net::accept(&listener)?;
+    // Send the error to the client
+    client_hello(incoming.into_socketlike(), Err(e))?;
+    // We've successfully sent the error; the caller of this function will
+    // propagate the error.
+    Ok(())
+}
+
+/// Perform initialization steps required by systemd service activation.
+///
+/// This ensures that the system is running under systemd, then receives the
+/// socket-FD for main IPC logic, and notifies systemd about ready-state.
+pub(crate) fn daemon_main(debug: bool) -> Result<()> {
+    let handle = tokio::runtime::Handle::current();
+    let _tokio_guard = handle.enter();
+    if !systemd::daemon::booted()? {
+        return Err(anyhow!("not running as a systemd service"));
+    }
+    let init_res: Result<()> = crate::ffi::daemon_init_inner(debug).map_err(|e| e.into());
+    tracing::debug!("Initialization result: {init_res:?}");
+
+    let mut fds = systemd::daemon::listen_fds(false)?.iter();
+    let fd = fds.next().ok_or_else(|| anyhow!("Missing socket"))?;
+    if fds.next().is_some() {
+        return Err(anyhow!("Expected exactly 1 fd from systemd activation"));
+    }
+    tracing::debug!("Initializing from socket activation; fd={fd}");
+    let listener = unsafe { OwnedFd::from_raw_fd(fd) }.into_socketlike();
+    // In the socket case, we will process the initialization error later.
+
+    // On success, we spawn a helper task that just responds with
+    // sucess to clients that connect via the socket.  In the future,
+    // perhaps we'll expose an API here.
+    tracing::debug!("Spawning acknowledgement task");
+    match init_res {
+        Ok(()) => {
+            dbg!(&listener);
+            std::thread::spawn(move || run_acknowledgement_worker(listener));
+        }
+        Err(e) => {
+            tracing::debug!("Sending error to client: {}", e);
+            let err_copy = anyhow::format_err!("{e}");
+            let r = std::thread::spawn(move || {
+                if let Err(suberr) = process_one_client(listener, err_copy) {
+                    tracing::warn!("Failed to respond to client: {suberr}")
+                }
+            });
+            // Block until we've written the reply to the client;
+            if let Err(e) = r.join() {
+                tracing::warn!("Failed to join response thread: {e:?}");
+            }
+            // And finally propagate out the error
+            return Err(e);
+        }
+    };
+
+    tracing::debug!("Entering daemon mainloop");
+    // And now, enter the main loop.
+    Ok(crate::ffi::daemon_main_inner()?)
 }
 
 /// Serialize information about the given deployment into the `dict`;

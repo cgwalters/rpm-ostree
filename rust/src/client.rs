@@ -6,13 +6,12 @@ use crate::core::OSTREE_BOOTED;
 use crate::cxxrsutil::*;
 use crate::ffi::SystemHostType;
 use crate::utils;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use fn_error_context::context;
 use gio::prelude::*;
 use ostree_ext::{gio, glib};
 use std::io::{BufRead, Write};
 use std::os::unix::io::IntoRawFd;
-use std::process::Command;
 
 /// The well-known bus name.
 const BUS_NAME: &str = "org.projectatomic.rpmostree1";
@@ -49,7 +48,8 @@ impl ClientConnection {
             SYSROOT_PATH,
             "org.projectatomic.rpmostree1.Sysroot",
             gio::Cancellable::NONE,
-        )?;
+        )
+        .context("Initializing sysroot proxy")?;
         // Today the daemon mode requires running inside a booted deployment.
         let booted = sysroot_proxy
             .cached_property("Booted")
@@ -156,46 +156,59 @@ pub(crate) fn client_handle_fd_argument(
     }
 }
 
-/// Explicitly ensure the daemon is started via systemd, if possible.
-///
-/// This works around bugs from DBus activation, see
-/// https://github.com/coreos/rpm-ostree/pull/2932
-///
-/// Basically we load too much data before claiming the bus name,
-/// and dbus doesn't give us a useful error.  Instead, let's talk
-/// to systemd directly and use its client tools to scrape errors.
-///
-/// What we really should do probably is use native socket activation.
+/// Connect to the client socket and ensure the daemon is initialized;
+/// this avoids DBus and ensures that we get any early startup errors
+/// returned cleanly.
+#[context("Starting daemon via socket")]
+fn start_daemon_via_socket() -> Result<()> {
+    use cap_std::io_lifetimes::IntoSocketlike;
+
+    futures::executor::block_on(async {
+        let c = tokio::net::UnixStream::connect("/run/rpm-ostree/client.sock").await?;
+        Ok::<_, anyhow::Error>(c)
+    })
+    .context("Connecting")?;
+
+    let address = sockaddr()?;
+    let socket = rustix::net::socket(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::STREAM,
+        rustix::net::Protocol::from_raw(0),
+    )?;
+    let addr = crate::client::sockaddr()?;
+    tracing::debug!("Starting daemon via {address:?}");
+    rustix::net::connect_unix(&socket, &addr)
+        .with_context(|| anyhow!("Failed to connect to {address:?}"))?;
+    let socket = socket.into_socketlike();
+    crate::daemon::write_message(
+        &socket,
+        crate::daemon::SocketMessage::ClientHello {
+            selfid: crate::core::self_id()?,
+        },
+    )
+    .context("Writing ClientHello")?;
+    let resp = crate::daemon::recv_message(&socket)?;
+    match resp {
+        crate::daemon::SocketMessage::ServerOk => Ok(()),
+        crate::daemon::SocketMessage::ServerError { msg } => {
+            Err(anyhow!("server error: {msg}").into())
+        }
+        o => Err(anyhow!("unexpected message: {o:?}").into()),
+    }
+}
+
+/// Returns the address of the client socket.
+pub(crate) fn sockaddr() -> Result<rustix::net::SocketAddrUnix> {
+    rustix::net::SocketAddrUnix::new("/run/rpm-ostree/client.sock").map_err(anyhow::Error::msg)
+}
+
 pub(crate) fn client_start_daemon() -> CxxResult<()> {
-    let service = "rpm-ostreed.service";
-    // Assume non-root can't use systemd right now.
+    // systemctl and socket paths only work for root right now; in the future
+    // the socket may be opened up.
     if rustix::process::getuid().as_raw() != 0 {
         return Ok(());
     }
-    // Unfortunately, RHEL8 systemd will count "systemctl start"
-    // invocations against the restart limit, so query the status
-    // first.
-    let activeres = Command::new("systemctl")
-        .args(&["is-active", "rpm-ostreed"])
-        .output()?;
-    // Explicitly don't check the error return value, we don't want to
-    // hard fail on it.
-    if String::from_utf8_lossy(&activeres.stdout).starts_with("active") {
-        // It's active, we're done.  Note that while this is a race
-        // condition, that's fine because it will be handled by DBus
-        // activation.
-        return Ok(());
-    }
-    let res = Command::new("systemctl")
-        .args(&["--no-ask-password", "start", service])
-        .status()?;
-    if !res.success() {
-        let _ = Command::new("systemctl")
-            .args(&["--no-pager", "status", service])
-            .status();
-        return Err(anyhow!("{}", res).into());
-    }
-    Ok(())
+    return start_daemon_via_socket().map_err(Into::into);
 }
 
 /// Convert the GVariant parameters from the DownloadProgress DBus API to a human-readable English string.
