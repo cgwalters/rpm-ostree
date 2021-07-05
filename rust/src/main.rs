@@ -14,6 +14,7 @@ fn inner_main() -> Result<()> {
     // Initialize failpoints
     let _scenario = fail::FailScenario::setup();
     fail::fail_point!("main");
+    procspawn::init();
     // Call this early on; it invokes e.g. setenv() so must be done
     // before we create threads.
     rpmostree_rust::ffi::early_main();
