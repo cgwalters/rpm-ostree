@@ -26,7 +26,10 @@ fn inner_main() -> Result<i32> {
         .with_writer(std::io::stderr)
         .init();
     tracing::trace!("starting");
-    // Gather our arguments.
+    // If we're called as a subprocess, dispatch that.
+    procspawn::init();
+    // Otherwise, perform normal main() bits.
+    // Gather our arguments and validate UTF-8.
     let args: Result<Vec<String>> = std::env::args_os()
         .map(|s| -> Result<String> {
             s.into_string()
