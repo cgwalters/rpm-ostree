@@ -4,6 +4,7 @@
 
 use crate::cxxrsutil::*;
 use crate::ffi::ContainerImport;
+use gio::prelude::*;
 use anyhow::{Context, Result};
 use std::convert::TryInto;
 use std::pin::Pin;
@@ -12,10 +13,12 @@ use std::pin::Pin;
 pub(crate) fn import_container(
     mut sysroot: Pin<&mut crate::FFIOstreeSysroot>,
     imgref: String,
+    mut cancellable: Pin<&mut crate::FFIGCancellable>,
 ) -> CxxResult<Box<ContainerImport>> {
     // TODO: take a GCancellable and monitor it, and drop the import task (which is how async cancellation works in Rust).
     let sysroot = &sysroot.gobj_wrap();
-    let repo = &sysroot.get_repo(gio::NONE_CANCELLABLE)?;
+    let cancellable = &cancellable.gobj_wrap();
+    let repo = &sysroot.get_repo(Some(cancellable))?;
     let imgref = imgref.as_str().try_into()?;
     let imported = build_runtime()?
         .block_on(async { ostree_ext::container::import(&repo, &imgref, None).await })?;

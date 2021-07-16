@@ -140,6 +140,7 @@ pub mod ffi {
         fn import_container(
             sysroot: Pin<&mut OstreeSysroot>,
             imgref: String,
+            cancellable: Pin<&mut GCancellable>,
         ) -> Result<Box<ContainerImport>>;
 
         fn fetch_digest(imgref: String) -> Result<String>;

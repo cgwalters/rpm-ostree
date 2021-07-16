@@ -464,7 +464,8 @@ rpmostree_sysroot_upgrader_pull_base (RpmOstreeSysrootUpgrader  *self,
               }
           }
 
-        auto import = rpmostreecxx::import_container(*self->sysroot, std::string(refspec));
+        g_assert (cancellable);
+        auto import = rpmostreecxx::import_container(*self->sysroot, std::string(refspec), *cancellable);
 
         rpmostree_origin_set_container_image_reference_digest (self->original_origin, import->image_digest.c_str());
         new_base_rev = strdup (import->ostree_commit.c_str());
