@@ -4,8 +4,8 @@
 
 use crate::cxxrsutil::*;
 use crate::ffi::ContainerImport;
-use gio::prelude::*;
 use anyhow::{Context, Result};
+use gio::prelude::*;
 use std::convert::TryInto;
 use std::pin::Pin;
 
@@ -20,8 +20,19 @@ pub(crate) fn import_container(
     let cancellable = &cancellable.gobj_wrap();
     let repo = &sysroot.get_repo(Some(cancellable))?;
     let imgref = imgref.as_str().try_into()?;
-    let imported = build_runtime()?
-        .block_on(async { ostree_ext::container::import(&repo, &imgref, None).await })?;
+    let imported = build_runtime()?.block_on(async {
+        let (tx, rs) = tokio::sync::oneshot::channel();
+        cancellable.connect_cancelled(move |c| drop(tx.send(())));
+
+        tokio::select! {
+            import = ostree_ext::container::import(&repo, &imgref, None) => {
+                import
+            }
+            _ = rs => {
+                Err(anyhow::anyhow!("Operation was cancelled"))
+            }
+        }
+    })?;
     Ok(Box::new(ContainerImport {
         ostree_commit: imported.ostree_commit,
         image_digest: imported.image_digest,
