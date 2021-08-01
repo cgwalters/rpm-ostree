@@ -267,11 +267,16 @@ fn origin_validate_roundtrip_inner(kf: &glib::KeyFile) -> Result<()> {
 /// For historical reasons, rpm-ostree has two file formats to represent
 /// state.  This bridges parts of an origin file to a treefile that
 /// is understood by the core.
-pub(crate) fn origin_validate_roundtrip(mut kf: Pin<&mut crate::ffi::GKeyFile>) {
+pub(crate) fn origin_validate_roundtrip(mut kf: Pin<&mut crate::ffi::GKeyFile>) -> Result<()> {
     let kf = kf.gobj_wrap();
-    origin_validate_roundtrip_inner(&kf).err().map(|e| {
-        tracing::debug!("Failed to roundtrip origin: {}", e);
-    });
+    if let Err(e) = origin_validate_roundtrip_inner(&kf) {
+        let msg = format!("Failed to roundtrip origin: {}", e);
+        tracing::debug!("{}", &msg);
+        fail::fail_point!("origin-roundtrip", |r| Err(anyhow::Error::msg(
+            r.unwrap_or(msg)
+        )));
+    }
+    Ok(())
 }
 
 fn map_keyfile_optional<T>(res: StdResult<T, glib::Error>) -> StdResult<Option<T>, glib::Error> {

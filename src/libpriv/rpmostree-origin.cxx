@@ -200,7 +200,11 @@ rpmostree_origin_parse_keyfile (GKeyFile         *origin,
 
   // We will eventually start converting origin to treefile, this helps us
   // debug cases that may fail currently.
-  rpmostreecxx::origin_validate_roundtrip(*ret->kf);
+  try {
+    rpmostreecxx::origin_validate_roundtrip(*ret->kf);
+  } catch (std::exception &e) {
+    return (RpmOstreeOrigin*)glnx_null_throw(error, "%s", e.what());
+  }
 
   return util::move_nullify (ret);
 }
