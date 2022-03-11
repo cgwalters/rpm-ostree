@@ -1,0 +1,55 @@
+# Inspired by https://github.com/rust-analyzer/rust-analyzer/blob/master/.github/workflows/ci.yaml
+# but tweaked in several ways.  If you make changes here, consider doing so across other
+# repositories in e.g. ostreedev etc.
+name: Compose tests
+
+permissions:
+  actions: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Minimum supported Rust version (MSRV)
+  ACTION_MSRV_TOOLCHAIN: 1.54.0
+  # Pinned toolchain for linting
+  ACTION_LINTS_TOOLCHAIN: 1.58.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: registry.ci.openshift.org/coreos/fcos-buildroot:testing-devel
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install deps
+        run: ./ci/installdeps.sh
+      # xref containers/containers-image-proxy-rs
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@ce325b60658c1b38465c06cc965b79baf32c1e72
+      - name: Build
+        run: ./ci/build.sh
+      - name: Upload binary
+        uses: actions/upload-artifact@v2
+        with:
+          name: rpm-ostree
+          path: target/release/rpm-ostree
+  legacy-compose-tests:
+    name: "Legacy compose tests"
+    needs: build
+    runs-on: ubuntu-latest
+    container: registry.ci.openshift.org/coreos/coreos-assembler:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Download built binary
+        uses: actions/download-artifact@v2
+        with:
+          name: rpm-ostree
+      - name: Install
+        run: install rpm-ostree /usr/bin
+      - name: Integration tests
+        run: env JOBS=3 ./ci/compose.sh
