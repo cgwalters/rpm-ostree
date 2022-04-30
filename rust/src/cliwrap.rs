@@ -59,6 +59,7 @@ pub fn entrypoint(args: &[&str]) -> Result<()> {
         Ok(cliutil::exec_real_binary(name, args)?)
     } else {
         match name {
+            "install-to-root" => install_to_root(args),
             "rpm" => Ok(self::rpm::main(args)?),
             "yum" | "dnf" => Ok(self::yumdnf::main(args)?),
             "dracut" => Ok(self::dracut::main(args)?),
@@ -66,6 +67,16 @@ pub fn entrypoint(args: &[&str]) -> Result<()> {
             _ => Err(anyhow!("Unknown wrapped binary: {}", name)),
         }
     }
+}
+
+/// Write wrappers to the target root filesystem.
+fn install_to_root(args: &[&str]) -> Result<()> {
+    let root = args
+        .get(0)
+        .map(Path::new)
+        .ok_or_else(|| anyhow!("Missing required argument: ROOTDIR"))?;
+    let root = &Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    write_wrappers(root)
 }
 
 #[context("Writing wrapper for {:?}", binpath)]
