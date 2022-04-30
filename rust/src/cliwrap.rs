@@ -41,9 +41,10 @@ pub(crate) enum RunDisposition {
 pub fn entrypoint(args: &[&str]) -> Result<()> {
     // Skip the initial bits
     let args = &args[2..];
-    // We'll panic here if the vector is empty, but that is intentional;
-    // the outer code should always pass us at least one arg.
-    let name = args[0];
+    // The outer code should always pass us at least one arg.
+    let name = args
+        .get(0)
+        .ok_or_else(|| anyhow!("Missing required argument"))?;
     let name = match std::path::Path::new(name).file_name() {
         Some(name) => name,
         None => return Err(anyhow!("Invalid wrapped binary: {}", name)),
