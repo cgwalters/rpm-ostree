@@ -28,6 +28,7 @@
 #include <libdnf/libdnf.h>
 #include <libglnx.h>
 #include <linux/magic.h>
+#include <memory>
 #include <optional>
 #include <rpm/rpmmacro.h>
 #include <stdio.h>
@@ -177,6 +178,7 @@ typedef struct
   char *previous_checksum;
 
   std::optional<rust::Box<rpmostreecxx::Treefile> > treefile_rs;
+  std::optional<std::unique_ptr<FileMetadataOverrideSet> > file_overrides;
   JsonParser *treefile_parser;
   JsonNode *treefile_rootval; /* Unowned */
   JsonObject *treefile;       /* Unowned */
@@ -189,6 +191,7 @@ rpm_ostree_tree_compose_context_free (RpmOstreeTreeComposeContext *ctx)
   g_clear_object (&ctx->treefile_path);
   g_clear_pointer (&ctx->metadata, g_hash_table_unref);
   ctx->treefile_rs.~optional ();
+  ctx->file_overrides.~optional ();
   /* Only close workdir_dfd if it's not owned by the tmpdir */
   if (!ctx->workdir_tmp.initialized)
     glnx_close_fd (&ctx->workdir_dfd);
@@ -1030,10 +1033,13 @@ impl_install_tree (RpmOstreeTreeComposeContext *self, gboolean *out_changed,
   if (!inject_advisories (self, cancellable, error))
     return FALSE;
 
+  /* Take cached data from the context */
+  self->file_overrides = rpmostreecxx::rpmostree_context_take_overrides (self->corectx);
+
   /* Destroy this now so the libdnf stack won't have any references
    * into the filesystem before we manipulate it.
    */
-  g_clear_object (&self->corectx);
+  rpmostree_context_prepare_commit (self->corectx);
 
   if (g_strcmp0 (g_getenv ("RPM_OSTREE_BREAK"), "post-yum") == 0)
     return FALSE;
@@ -1203,9 +1209,15 @@ impl_commit_tree (RpmOstreeTreeComposeContext *self, GCancellable *cancellable, 
   if (!gpgkey.empty ())
     gpgkey_c = gpgkey.c_str ();
   auto container = (*self->treefile_rs)->get_container ();
+
+  if (!self->file_overrides.has_value ())
+    self->file_overrides = std::make_unique<FileMetadataOverrideSet> ();
+  auto file_overrides = std::move (*self->file_overrides);
+
   if (!rpmostree_compose_commit (self->rootfs_dfd, self->build_repo, parent_revision, metadata,
                                  detached_metadata, gpgkey_c, container, selinux,
-                                 self->devino_cache, &new_revision, cancellable, error))
+                                 self->devino_cache, *file_overrides, &new_revision,
+                                 cancellable, error))
     return glnx_prefix_error (error, "Writing commit");
   g_assert (new_revision != NULL);
 

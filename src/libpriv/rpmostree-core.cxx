@@ -24,6 +24,7 @@
 #include <glib-unix.h>
 #include <libdnf/libdnf.h>
 #include <librepo/librepo.h>
+#include <memory>
 #include <rpm/rpmfi.h>
 #include <rpm/rpmlib.h>
 #include <rpm/rpmlog.h>
@@ -32,9 +33,11 @@
 #include <rpm/rpmts.h>
 #include <set>
 #include <systemd/sd-journal.h>
+#include <unistd.h>
 #include <utility>
 
 #include "rpmostree-core-private.h"
+#include "rpmostree-core.h"
 #include "rpmostree-cxxrs.h"
 #include "rpmostree-importer.h"
 #include "rpmostree-kernel.h"
@@ -103,6 +106,8 @@ rpmostree_context_finalize (GObject *object)
 
   g_clear_pointer (&rctx->rootfs_usrlinks, g_hash_table_unref);
 
+  rctx->file_overrides.~optional ();
+
   G_OBJECT_CLASS (rpmostree_context_parent_class)->finalize (object);
 }
 
@@ -119,6 +124,7 @@ rpmostree_context_init (RpmOstreeContext *self)
   self->tmprootfs_dfd = -1;
   self->dnf_cache_policy = RPMOSTREE_CONTEXT_DNF_CACHE_DEFAULT;
   self->enable_rofiles = TRUE;
+  self->unprivileged = getuid () != 0;
 }
 
 static void
@@ -546,6 +552,14 @@ core_libdnf_process_global_init ()
 
       g_once_init_leave (&initialized, 1);
     }
+}
+
+std::unique_ptr<FileMetadataOverrideSet>
+rpmostree_context_take_overrides (RpmOstreeContext *self)
+{
+  if (self->file_overrides.has_value ())
+    return std::move (*self->file_overrides);
+  return std::make_unique<FileMetadataOverrideSet> ();
 }
 
 } /* namespace */
@@ -3545,14 +3559,6 @@ apply_rpmfi_overrides (RpmOstreeContext *self, int tmprootfs_dfd, DnfPackage *pk
                        rpmostreecxx::PasswdEntries &passwd_entries, GCancellable *cancellable,
                        GError **error)
 {
-  /* In an unprivileged case, we can't do this on the real filesystem. For `ex
-   * container`, we want to completely ignore uid/gid.
-   *
-   * TODO: For non-root `--unified-core` we need to do it as a commit modifier.
-   */
-  if (getuid () != 0)
-    return TRUE; /* 🔚 Early return */
-
   g_auto (rpmfi) fi = NULL;
   gboolean emitted_nonusr_warning = FALSE;
   g_autofree char *path = get_package_relpath (pkg);
@@ -3574,10 +3580,6 @@ apply_rpmfi_overrides (RpmOstreeContext *self, int tmprootfs_dfd, DnfPackage *pk
        * set. The intention there is to avoid having transient suid binaries
        * exposed, but in practice today for rpm-ostree we use the "inaccessible
        * directory" pattern in repo/tmp.
-       *
-       * Another thing we could do down the line is to not chown things on disk
-       * and instead pass this data down into the commit modifier. That's in
-       * fact how gnome-continuous always worked.
        */
       const gboolean has_non_bare_user_mode = (mode & (S_ISUID | S_ISGID | S_ISVTX)) > 0;
 
@@ -3642,12 +3644,6 @@ apply_rpmfi_overrides (RpmOstreeContext *self, int tmprootfs_dfd, DnfPackage *pk
           return FALSE;
         }
 
-      if (!S_ISDIR (stbuf.st_mode))
-        {
-          if (!ostree_break_hardlink (tmprootfs_dfd, fn, FALSE, cancellable, error))
-            return glnx_prefix_error (error, "Copyup %s", fn);
-        }
-
       uid_t uid = 0;
       if (!g_str_equal (user, "root"))
         {
@@ -3673,6 +3669,32 @@ apply_rpmfi_overrides (RpmOstreeContext *self, int tmprootfs_dfd, DnfPackage *pk
 
           CXX_TRY_VAR (gidv, passwd_entries.lookup_group_id (group), error);
           gid = std::move (gidv);
+        }
+
+      if (self->unprivileged)
+        {
+          auto overridedata = std::make_unique<FileMetadataOverride> ();
+          if (uid != 0)
+            overridedata->uid = uid;
+          if (gid != 0)
+            overridedata->gid = uid;
+          if (have_fcaps)
+            {
+              g_autoptr (GVariant) xattrs = rpmostree_fcap_to_xattr_variant (fcaps);
+              overridedata->xattrs = GVariantWrapper (xattrs);
+            }
+
+          if (!self->file_overrides.has_value ())
+            self->file_overrides = std::make_unique<FileMetadataOverrideSet> ();
+          (*self->file_overrides)->insert_or_assign (fn, std::move (overridedata));
+          continue;
+        }
+
+      /* This is the privileged path, where we currently mutate the files directly */
+      if (!S_ISDIR (stbuf.st_mode))
+        {
+          if (!ostree_break_hardlink (tmprootfs_dfd, fn, FALSE, cancellable, error))
+            return glnx_prefix_error (error, "Copyup %s", fn);
         }
 
       if (fchownat (tmprootfs_dfd, fn, uid, gid, AT_SYMLINK_NOFOLLOW) != 0)
@@ -4494,6 +4516,31 @@ rpmostree_context_assemble_end (RpmOstreeContext *self, GCancellable *cancellabl
   return TRUE;
 }
 
+static GVariant *
+filemeta_xattrs_cb (OstreeRepo *repo, const char *relpath, GFileInfo *file_info, gpointer user_data)
+{
+  auto set = static_cast<FileMetadataOverrideSet *> (user_data);
+  g_assert (set);
+
+  auto o = set->find (relpath);
+  if (o == set->end ())
+    return nullptr;
+
+  auto override = &*o->second;
+  if (override->xattrs.has_value ())
+    return g_variant_ref (override->xattrs->get ());
+  return nullptr;
+}
+
+// De-initialize any references to open files in the target root, preparing
+// it for commit.
+void 
+rpmostree_context_prepare_commit (RpmOstreeContext *self)
+{
+  /* Clear this out to ensure it's not holding open any files */
+  g_clear_object (&self->dnfctx);
+}
+
 gboolean
 rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
                           RpmOstreeAssembleType assemble_type, char **out_commit,
@@ -4502,6 +4549,8 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
   g_autoptr (OstreeRepoCommitModifier) commit_modifier = NULL;
   g_autofree char *ret_commit_checksum = NULL;
 
+  rpmostree_context_prepare_commit (self);
+
   auto task = rpmostreecxx::progress_begin_task ("Writing OSTree commit");
 
   g_auto (RpmOstreeRepoAutoTransaction) txn = {
@@ -4509,6 +4558,8 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
   };
   if (!rpmostree_repo_auto_transaction_start (&txn, self->ostreerepo, FALSE, cancellable, error))
     return FALSE;
+
+  auto filemeta = rpmostreecxx::rpmostree_context_take_overrides (self);
 
   {
     glnx_unref_object OstreeMutableTree *mtree = NULL;
@@ -4626,9 +4677,7 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
       }
     else if (assemble_type == RPMOSTREE_ASSEMBLE_TYPE_SERVER_BASE)
       {
-        /* Note this branch isn't actually used today; the compose side commit
-         * code is in impl_commit_tree(). */
-        g_assert_not_reached ();
+        /* Fall through */
       }
     else
       {
@@ -4671,9 +4720,12 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
               static_cast<int> (modflags) | OSTREE_REPO_COMMIT_MODIFIER_FLAGS_DEVINO_CANONICAL);
       }
 
-    commit_modifier = ostree_repo_commit_modifier_new (modflags, NULL, NULL, NULL);
+    commit_modifier = ostree_repo_commit_modifier_new (modflags, rpmostree_filemeta_commit_filter,
+                                                       static_cast<void *> (&*filemeta), NULL);
     if (final_sepolicy)
       ostree_repo_commit_modifier_set_sepolicy (commit_modifier, final_sepolicy);
+    ostree_repo_commit_modifier_set_xattr_callback (commit_modifier, filemeta_xattrs_cb, NULL,
+                                                    static_cast<void *> (&*filemeta));
 
     if (self->devino_cache)
       ostree_repo_commit_modifier_set_devino_cache (commit_modifier, self->devino_cache);
@@ -4692,8 +4744,11 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
         = g_variant_ref_sink (g_variant_builder_end (&metadata_builder));
     // Unfortunately this API takes GVariantDict, not GVariantBuilder, so convert
     g_autoptr (GVariantDict) metadata_dict = g_variant_dict_new (metadata_so_far);
-    if (!ostree_commit_metadata_for_bootable (root, metadata_dict, cancellable, error))
-      return FALSE;
+    if (!self->treefile_rs->get_container ())
+      {
+        if (!ostree_commit_metadata_for_bootable (root, metadata_dict, cancellable, error))
+          return FALSE;
+      }
     g_autoptr (GVariant) metadata = g_variant_dict_end (metadata_dict);
 
     {
@@ -4705,6 +4760,14 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
 
     if (self->ref != NULL)
       ostree_repo_transaction_set_ref (self->ostreerepo, NULL, self->ref, ret_commit_checksum);
+
+    auto gpgkey = self->treefile_rs->get_gpg_key ();
+    if (gpgkey.size () > 0)
+      {
+        if (!ostree_repo_sign_commit (self->ostreerepo, ret_commit_checksum, gpgkey.c_str (), NULL,
+                                      cancellable, error))
+          return glnx_prefix_error (error, "While signing commit");
+      }
 
     {
       OstreeRepoTransactionStats stats;
@@ -4752,4 +4815,28 @@ rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
   if (out_commit)
     *out_commit = util::move_nullify (ret_commit_checksum);
   return TRUE;
+}
+
+/* Common filter function shared between the compose and client-side commit paths.
+ * The user data passed *must* be a reference (non-NULL pointer) to a FileMetadataOverrideSet
+ */
+OstreeRepoCommitFilterResult
+rpmostree_filemeta_commit_filter (OstreeRepo *repo, const char *path, GFileInfo *file_info,
+                                  gpointer user_data)
+{
+  auto set = static_cast<FileMetadataOverrideSet *> (user_data);
+  g_assert (set);
+
+  auto o = set->find (path);
+  if (o == set->end ())
+    return OSTREE_REPO_COMMIT_FILTER_ALLOW;
+  auto override = &*o->second;
+  if (override->uid.has_value ())
+    g_file_info_set_attribute_uint32 (file_info, "unix::uid", *override->uid);
+  if (override->gid.has_value ())
+    g_file_info_set_attribute_uint32 (file_info, "unix::gid", *override->gid);
+  if (override->mode.has_value ())
+    g_file_info_set_attribute_uint32 (file_info, "unix::mode", *override->mode);
+
+  return OSTREE_REPO_COMMIT_FILTER_ALLOW;
 }

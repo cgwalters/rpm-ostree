@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include "rpmostree-core.h"
 #include "rpmostree-cxxrs.h"
 #include <ostree.h>
 
@@ -34,10 +35,12 @@ gboolean rpmostree_prepare_rootfs_get_sepolicy (int dfd, OstreeSePolicy **out_se
 gboolean rpmostree_rootfs_fixup_selinux_store_root (int rootfs_dfd, GCancellable *cancellable,
                                                     GError **error);
 
+
 gboolean rpmostree_compose_commit (int rootfs_dfd, OstreeRepo *repo, const char *parent,
                                    GVariant *metadata, GVariant *detached_metadata,
                                    const char *gpg_keyid, gboolean container,
                                    gboolean enable_selinux, OstreeRepoDevInoCache *devino_cache,
+                                   FileMetadataOverrideSet &fileoverrides,
                                    char **out_new_revision, GCancellable *cancellable,
                                    GError **error);
 

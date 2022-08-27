@@ -23,7 +23,9 @@
 #include <gio/gio.h>
 #include <libdnf/libdnf.h>
 #include <memory>
+#include <optional>
 #include <ostree.h>
+#include <unordered_map>
 
 #include "libglnx.h"
 #include "rpmostree-cxxrs.h"
@@ -31,6 +33,31 @@
 // C++ APIs
 std::unique_ptr<rust::Vec<rpmostreecxx::StringMapping> >
 rpmostree_dnfcontext_get_varsubsts (DnfContext *context);
+
+// Thin C++ wrapper for GVariant
+struct GVariantWrapper
+{
+  GVariant *_v;
+
+  GVariant *
+  get ()
+  {
+    return _v;
+  }
+
+  GVariantWrapper (GVariant *v) { _v = g_variant_ref (v); }
+  ~GVariantWrapper () { g_variant_unref (_v); }
+};
+
+struct FileMetadataOverride
+{
+  std::optional<guint32> uid;
+  std::optional<guint32> gid;
+  std::optional<guint32> mode;
+  std::optional<GVariantWrapper> xattrs;
+};
+typedef std::unordered_map<std::string, std::unique_ptr<FileMetadataOverride> >
+    FileMetadataOverrideSet;
 
 // Begin C APIs
 G_BEGIN_DECLS
@@ -177,6 +204,8 @@ int rpmostree_context_get_tmprootfs_dfd (RpmOstreeContext *self);
 
 gboolean rpmostree_context_get_kernel_changed (RpmOstreeContext *self);
 
+void rpmostree_context_prepare_commit (RpmOstreeContext *self);
+
 /* NB: tmprootfs_dfd is allowed to have pre-existing data */
 /* devino_cache can be NULL if no previous cache established */
 gboolean rpmostree_context_assemble (RpmOstreeContext *self, GCancellable *cancellable,
@@ -187,4 +216,10 @@ gboolean rpmostree_context_commit (RpmOstreeContext *self, const char *parent,
                                    RpmOstreeAssembleType assemble_type, char **out_commit,
                                    GCancellable *cancellable, GError **error);
 
+OstreeRepoCommitFilterResult rpmostree_filemeta_commit_filter (OstreeRepo *repo, const char *path, GFileInfo *file_info, gpointer user_data);
+
 G_END_DECLS
+
+namespace rpmostreecxx {
+  std::unique_ptr<FileMetadataOverrideSet> rpmostree_context_take_overrides (RpmOstreeContext *self);
+}

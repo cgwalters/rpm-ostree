@@ -54,6 +54,8 @@ struct _RpmOstreeContext
   OstreeSePolicy *sepolicy;
   char *passwd_dir;
 
+  std::optional<std::unique_ptr<FileMetadataOverrideSet>> file_overrides;
+
   guint async_index; /* Offset into array if applicable */
   guint n_async_running;
   guint n_async_max;

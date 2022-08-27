@@ -597,6 +597,8 @@ struct CommitThreadData
   OstreeMutableTree *mtree;
   OstreeSePolicy *sepolicy;
   OstreeRepoCommitModifier *commit_modifier;
+  FileMetadataOverrideSet *fileoverrides;
+  bool unprivileged;
   gboolean success;
   GCancellable *cancellable;
   GError **error;
@@ -639,6 +641,20 @@ filter_xattrs_cb (OstreeRepo *repo, const char *relpath, GFileInfo *file_info, g
   g_assert (relpath);
 
   auto tdata = static_cast<struct CommitThreadData *> (user_data);
+
+  // In the unprivileged case, we only take xattr data that we computed in memory;
+  // mainly from RPM metadata.
+  if (tdata->unprivileged)
+    {
+      auto override = tdata->fileoverrides->find (relpath);
+      if (override == tdata->fileoverrides->end ())
+        return NULL;
+      auto val = &*override->second;
+      if (val->xattrs.has_value ())
+        return g_variant_ref (val->xattrs->get ());
+      return NULL;
+    }
+
   int rootfs_fd = tdata->rootfs_fd;
   /* If you have a use case for something else, file an issue */
   static const char *accepted_xattrs[] = {
@@ -752,7 +768,8 @@ gboolean
 rpmostree_compose_commit (int rootfs_fd, OstreeRepo *repo, const char *parent_revision,
                           GVariant *src_metadata, GVariant *detached_metadata,
                           const char *gpg_keyid, gboolean container, gboolean enable_selinux,
-                          OstreeRepoDevInoCache *devino_cache, char **out_new_revision,
+                          OstreeRepoDevInoCache *devino_cache,
+                          FileMetadataOverrideSet &fileoverrides, char **out_new_revision,
                           GCancellable *cancellable, GError **error)
 {
   g_autoptr (OstreeSePolicy) sepolicy = NULL;
@@ -775,11 +792,13 @@ rpmostree_compose_commit (int rootfs_fd, OstreeRepo *repo, const char *parent_re
       OSTREE_REPO_COMMIT_MODIFIER_FLAGS_ERROR_ON_UNLABELED
       | OSTREE_REPO_COMMIT_MODIFIER_FLAGS_CONSUME);
   /* If changing this, also look at changing rpmostree-unpacker.c */
-  g_autoptr (OstreeRepoCommitModifier) commit_modifier
-      = ostree_repo_commit_modifier_new (modifier_flags, NULL, NULL, NULL);
+  g_autoptr (OstreeRepoCommitModifier) commit_modifier = ostree_repo_commit_modifier_new (
+      modifier_flags, rpmostree_filemeta_commit_filter, static_cast<void *> (&fileoverrides), NULL);
   struct CommitThreadData tdata = {
     0,
   };
+  tdata.unprivileged = getuid () != 0;
+  tdata.fileoverrides = &fileoverrides;
   ostree_repo_commit_modifier_set_xattr_callback (commit_modifier, filter_xattrs_cb, NULL, &tdata);
 
   if (sepolicy && ostree_sepolicy_get_name (sepolicy) != NULL)
