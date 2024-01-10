@@ -1326,6 +1326,7 @@ using ClientConnection = ::rpmostreecxx::ClientConnection;
 using RPMDiff = ::rpmostreecxx::RPMDiff;
 using RpmOstreeDiffPrintFormat = ::rpmostreecxx::RpmOstreeDiffPrintFormat;
 using Progress = ::rpmostreecxx::Progress;
+using RpmFileDb = ::rpmostreecxx::RpmFileDb;
 using RpmTs = ::rpmostreecxx::RpmTs;
 using PackageMeta = ::rpmostreecxx::PackageMeta;
 }
@@ -3258,17 +3259,17 @@ extern "C"
   }
 
   ::rust::repr::PtrLen
-  rpmostreecxx$cxxbridge1$RpmTs$packages_providing_file (
-      ::rpmostreecxx::RpmTs const &self, ::rust::Str path,
+  rpmostreecxx$cxxbridge1$RpmFileDb$find_pkgs_for_file (
+      ::rpmostreecxx::RpmFileDb const &self, ::rust::Str path,
       ::rust::Vec< ::rust::String> *return$) noexcept
   {
-    ::rust::Vec< ::rust::String> (::rpmostreecxx::RpmTs::*packages_providing_file$) (::rust::Str)
+    ::rust::Vec< ::rust::String> (::rpmostreecxx::RpmFileDb::*find_pkgs_for_file$) (::rust::Str)
         const
-        = &::rpmostreecxx::RpmTs::packages_providing_file;
+        = &::rpmostreecxx::RpmFileDb::find_pkgs_for_file;
     ::rust::repr::PtrLen throw$;
     ::rust::behavior::trycatch (
         [&] {
-          new (return$)::rust::Vec< ::rust::String> ((self.*packages_providing_file$) (path));
+          new (return$)::rust::Vec< ::rust::String> ((self.*find_pkgs_for_file$) (path));
           throw$.ptr = nullptr;
         },
         ::rust::detail::Fail (throw$));
@@ -3286,6 +3287,25 @@ extern "C"
     ::rust::behavior::trycatch (
         [&] {
           new (return$)::rpmostreecxx::PackageMeta *((self.*package_meta$) (name).release ());
+          throw$.ptr = nullptr;
+        },
+        ::rust::detail::Fail (throw$));
+    return throw$;
+  }
+
+  ::rust::repr::PtrLen
+  rpmostreecxx$cxxbridge1$RpmTs$build_file_cache_from_rpmdb (
+      ::rpmostreecxx::RpmTs const &self, ::rpmostreecxx::GFile const &fs_root,
+      ::rpmostreecxx::RpmFileDb **return$) noexcept
+  {
+    ::std::unique_ptr< ::rpmostreecxx::RpmFileDb> (
+        ::rpmostreecxx::RpmTs::*build_file_cache_from_rpmdb$) (::rpmostreecxx::GFile const &) const
+        = &::rpmostreecxx::RpmTs::build_file_cache_from_rpmdb;
+    ::rust::repr::PtrLen throw$;
+    ::rust::behavior::trycatch (
+        [&] {
+          new (return$)::rpmostreecxx::RpmFileDb *(
+              (self.*build_file_cache_from_rpmdb$) (fs_root).release ());
           throw$.ptr = nullptr;
         },
         ::rust::detail::Fail (throw$));
@@ -6449,6 +6469,41 @@ extern "C"
       ::std::unique_ptr< ::rpmostreecxx::PackageMeta> *ptr) noexcept
   {
     ::rust::deleter_if< ::rust::detail::is_complete< ::rpmostreecxx::PackageMeta>::value>{}(ptr);
+  }
+
+  static_assert (::rust::detail::is_complete< ::rpmostreecxx::RpmFileDb>::value,
+                 "definition of RpmFileDb is required");
+  static_assert (sizeof (::std::unique_ptr< ::rpmostreecxx::RpmFileDb>) == sizeof (void *), "");
+  static_assert (alignof (::std::unique_ptr< ::rpmostreecxx::RpmFileDb>) == alignof (void *), "");
+  void
+  cxxbridge1$unique_ptr$rpmostreecxx$RpmFileDb$null (
+      ::std::unique_ptr< ::rpmostreecxx::RpmFileDb> *ptr) noexcept
+  {
+    ::new (ptr)::std::unique_ptr< ::rpmostreecxx::RpmFileDb> ();
+  }
+  void
+  cxxbridge1$unique_ptr$rpmostreecxx$RpmFileDb$raw (
+      ::std::unique_ptr< ::rpmostreecxx::RpmFileDb> *ptr, ::rpmostreecxx::RpmFileDb *raw) noexcept
+  {
+    ::new (ptr)::std::unique_ptr< ::rpmostreecxx::RpmFileDb> (raw);
+  }
+  ::rpmostreecxx::RpmFileDb const *
+  cxxbridge1$unique_ptr$rpmostreecxx$RpmFileDb$get (
+      ::std::unique_ptr< ::rpmostreecxx::RpmFileDb> const &ptr) noexcept
+  {
+    return ptr.get ();
+  }
+  ::rpmostreecxx::RpmFileDb *
+  cxxbridge1$unique_ptr$rpmostreecxx$RpmFileDb$release (
+      ::std::unique_ptr< ::rpmostreecxx::RpmFileDb> &ptr) noexcept
+  {
+    return ptr.release ();
+  }
+  void
+  cxxbridge1$unique_ptr$rpmostreecxx$RpmFileDb$drop (
+      ::std::unique_ptr< ::rpmostreecxx::RpmFileDb> *ptr) noexcept
+  {
+    ::rust::deleter_if< ::rust::detail::is_complete< ::rpmostreecxx::RpmFileDb>::value>{}(ptr);
   }
 } // extern "C"
 
