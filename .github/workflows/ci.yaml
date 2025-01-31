@@ -245,7 +245,13 @@ jobs:
     name: "Build (c9s)"
     runs-on: ubuntu-latest
     container: quay.io/centos/centos:stream9
+    # https://github.com/Mozilla-Actions/sccache-action
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
     steps:
+      - name: Init sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
       - name: Install git
         run: yum -y install git
       - name: Checkout repository
@@ -260,7 +266,7 @@ jobs:
       - name: Install dependencies
         run: ./ci/installdeps.sh
       - name: Build
-        run: ./ci/build.sh && make install DESTDIR=$(pwd)/install && tar -C install -czf install.tar .
+        run: env CC="sccache gcc" CXX="sccache gcc" ./ci/build.sh && make install DESTDIR=$(pwd)/install && tar -C install -czf install.tar .
       - name: Unit tests
         run: cargo test
       - name: Upload binary
