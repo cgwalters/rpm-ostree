@@ -5,14 +5,14 @@ dn=$(dirname $0)
 . ${dn}/libbuild.sh
 
 # Enable EPEL for packages not available in base repos
-if test -f /usr/lib/os-release; then
+if [ -f /usr/lib/os-release ]; then
     . /usr/lib/os-release
-    if [[ "${ID_LIKE}" =~ rhel ]] && [[ ${VERSION_ID} -gt 8 ]]; then
+    if [[ "${ID_LIKE:-}" =~ rhel ]] && [[ "${VERSION_ID%%.*}" -gt 8 ]]; then
         echo "Enabling EPEL repository for RHEL-like system"
-        # Install yum-utils first for yum config-manager
+        # Install yum-utils first for dnf config-manager
         pkg_install yum-utils
         # Enable CRB repository (required for many EPEL packages)
-        yum config-manager --set-enabled crb
+        dnf config-manager --set-enabled crb
         # Now install EPEL
         pkg_install epel-release
     fi
