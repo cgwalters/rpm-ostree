@@ -23,8 +23,8 @@ jobs:
     runs-on: ubuntu-24.04
     container: quay.io/centos-bootc/centos-bootc:stream9
     steps:
-      - name: Install git
-        run: dnf -y install git
+      - name: Install git and clang-format
+        run: dnf -y install git clang-tools-extra
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
