@@ -108,11 +108,13 @@ fi
 
 # test treefile-apply
 # do it before cliwrap because we want real dnf
-if rpm -q ltrace vim-enhanced; then
-  fatal "ltrace and/or vim-enhanced exist"
-fi
-vim_vr=$(rpm -q vim-minimal --qf '%{version}-%{release}')
-cat > /tmp/treefile.yaml << EOF
+# Skip version locking tests on CentOS Stream 9 (no versionlock plugin)
+if [ -z "${is_centos:-}" ]; then
+  if rpm -q ltrace vim-enhanced; then
+    fatal "ltrace and/or vim-enhanced exist"
+  fi
+  vim_vr=$(rpm -q vim-minimal --qf '%{version}-%{release}')
+  cat > /tmp/treefile.yaml << EOF
 packages:
   - ltrace
   # a split base/layered version-locked package
@@ -128,18 +130,19 @@ conditional-include:
       repos: [fedora-cisco-openh264]
       packages: [openh264-devel]
 EOF
-# setting `repos` to empty list; should fail
-if rpm-ostree experimental compose treefile-apply /tmp/treefile.yaml --var addrepos=disable; then
-  fatal "installed packages without enabled repos?"
+  # setting `repos` to empty list; should fail
+  if rpm-ostree experimental compose treefile-apply /tmp/treefile.yaml --var addrepos=disable; then
+    fatal "installed packages without enabled repos?"
+  fi
+  if rpm -q ltrace; then fatal "ltrace installed"; fi
+  if rpm -q vim-enhanced-"$vim_vr"; then fatal "vim-enhanced installed"; fi
+  # not setting repos; default enablement
+  rpm-ostree experimental compose treefile-apply /tmp/treefile.yaml --var addrepos=
+  rpm -q ltrace vim-enhanced-"$vim_vr"
+  # setting repos; only those repos enabled
+  rpm-ostree experimental compose treefile-apply /tmp/treefile.yaml --var addrepos=enable
+  rpm -q openh264-devel
 fi
-if rpm -q ltrace; then fatal "ltrace installed"; fi
-if rpm -q vim-enhanced-"$vim_vr"; then fatal "vim-enhanced installed"; fi
-# not setting repos; default enablement
-rpm-ostree experimental compose treefile-apply /tmp/treefile.yaml --var addrepos=
-rpm -q ltrace vim-enhanced-"$vim_vr"
-# setting repos; only those repos enabled
-rpm-ostree experimental compose treefile-apply /tmp/treefile.yaml --var addrepos=enable
-rpm -q openh264-devel
 
 rpm-ostree cliwrap install-to-root /
 

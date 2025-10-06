@@ -170,7 +170,7 @@ jobs:
       matrix:
         RELEASE: ['42']
     container:
-      image: quay.io/centos/centos-bootc:stream9
+      image: quay.io/centos-bootc/centos-bootc:stream9
       options: "--user root --privileged -v /var/tmp:/var/tmp"
     steps:
       - name: Checkout repository
